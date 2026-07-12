@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GT Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        .markdown-content h1 { font-size: 1.5rem; font-weight: bold; color: #1f2937; margin-top: 1rem; margin-bottom: 0.5rem; }
+        .markdown-content h2 { font-size: 1.25rem; font-weight: bold; color: #1f2937; margin-top: 0.875rem; margin-bottom: 0.5rem; }
+        .markdown-content h3 { font-size: 1.125rem; font-weight: bold; color: #374151; margin-top: 0.75rem; margin-bottom: 0.5rem; }
+        .markdown-content h4 { font-size: 1rem; font-weight: bold; color: #4b5563; margin-top: 0.625rem; margin-bottom: 0.5rem; }
+        .markdown-content h5 { font-size: 0.875rem; font-weight: bold; color: #6b7280; margin-top: 0.5rem; margin-bottom: 0.5rem; }
+        .markdown-content h6 { font-size: 0.75rem; font-weight: bold; color: #9ca3af; margin-top: 0.5rem; margin-bottom: 0.5rem; }
+        .markdown-content p { margin-bottom: 0.5rem; line-height: 1.6; }
+        .markdown-content ul { list-style-type: disc; padding-left: 1.5rem; margin-bottom: 0.5rem; }
+        .markdown-content ol { list-style-type: decimal; padding-left: 1.5rem; margin-bottom: 0.5rem; }
+        .markdown-content li { margin-bottom: 0.25rem; }
+        .markdown-content blockquote { border-left: 4px solid #e5e7eb; padding-left: 1rem; color: #6b7280; font-style: italic; margin-bottom: 0.5rem; }
+        .markdown-content code { background-color: #f3f4f6; padding: 0.125rem 0.25rem; border-radius: 0.25rem; font-family: monospace; font-size: 0.875rem; }
+        .markdown-content pre { background-color: #1f2937; color: #f9fafb; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 0.5rem; }
+        .markdown-content pre code { background-color: transparent; padding: 0; color: inherit; }
+        .markdown-content a { color: #6366f1; text-decoration: underline; }
+        .markdown-content hr { border: none; border-top: 1px solid #e5e7eb; margin: 1rem 0; }
+        .markdown-content table { border-collapse: collapse; width: 100%; margin-bottom: 0.5rem; }
+        .markdown-content th, .markdown-content td { border: 1px solid #e5e7eb; padding: 0.5rem; text-align: left; }
+        .markdown-content th { background-color: #f9fafb; font-weight: bold; }
+        .markdown-content tr:nth-child(even) { background-color: #f9fafb; }
+        .markdown-content strong { font-weight: bold; }
+        .markdown-content em { font-style: italic; }
+        .markdown-content del { text-decoration: line-through; }
+        .markdown-content img { max-width: 100%; height: auto; border-radius: 0.25rem; }
+    
+    #chat-container.fullscreen {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        margin: 0;
+        border-radius: 0;
+        z-index: 1000;
+        flex-direction: row;
+        overflow: hidden;
+    }
+    
+    #chat-container.fullscreen #fullscreen-sidebar {
+        display: flex !important;
+        flex-shrink: 0;
+        height: calc(100vh - 40px);
+    }
+    
+    #chat-container.fullscreen .flex-1.flex.flex-col {
+        height: calc(100vh - 40px);
+        min-width: 0;
+    }
+    
+    #chat-container.fullscreen #chat-messages {
+        height: calc(100vh - 200px) !important;
+    }
+    
+    .hide-on-fullscreen {
+        transition: opacity 0.3s, transform 0.3s;
+    }
+    
+    #chat-container.fullscreen ~ .hide-on-fullscreen {
+        opacity: 0;
+        pointer-events: none;
+        transform: scale(0.95);
+    }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-indigo-500 to-purple-700 min-h-screen p-5">
+    <div class="max-w-7xl mx-auto">
+        <header class="text-center mb-8 hide-on-fullscreen">
+            <h1 class="text-white text-4xl font-bold mb-2 drop-shadow-lg">
+                <i class="fas fa-brain"></i> GT Agent
+            </h1>
+            <p class="text-white/80 text-lg">本地智能开发助手 · 知识即文件</p>
+        </header>
+
+        <div class="flex justify-center gap-4 mb-6 flex-wrap hide-on-fullscreen">
+            <div class="bg-white/20 px-4 py-2 rounded-full text-white text-sm" id="health-status">
+                <i class="fas fa-heartbeat"></i> 检查中...
+            </div>
+            <button onclick="refreshAll()" class="bg-white/20 hover:bg-white/30 px-4 py-2 rounded-full text-white text-sm cursor-pointer transition-all">
+                <i class="fas fa-sync-alt"></i> 刷新
+            </button>
+        </div>
+
+        <div id="chat-container" class="bg-white rounded-2xl p-5 shadow-lg mb-6 flex flex-col" ondragover="handleChatDragOver(event)" ondragleave="handleChatDragLeave(event)" ondrop="handleChatDrop(event)">
+            <div id="fullscreen-sidebar" class="hidden w-72 bg-gray-50 rounded-xl p-4 mr-4 overflow-hidden flex flex-col">
+                <div class="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-400 to-indigo-600 flex items-center justify-center">
+                        <i class="fas fa-comments text-white text-sm"></i>
+                    </div>
+                    <div>
+                        <div class="font-semibold text-gray-800 text-sm">历史对话</div>
+                        <div class="text-xs text-gray-500" id="fullscreen-conv-count">0 条</div>
+                    </div>
+                </div>
+                <div id="fullscreen-conv-list" class="flex-1 overflow-y-auto"></div>
+            </div>
+            <div class="flex-1 flex flex-col">
+                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-400 to-pink-600 flex items-center justify-center">
+                        <i class="fas fa-robot text-white"></i>
+                    </div>
+                    <div>
+                        <div class="font-semibold text-gray-800">Chat with GT Agent</div>
+                        <div class="text-xs text-gray-500" id="chat-conv-info">基于 Qwen 大模型 · 智能检索知识库</div>
+                    </div>
+                    <div class="ml-auto flex items-center gap-2">
+                        <button onclick="newConversation()" id="new-conv-btn" class="px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-xs font-medium hover:bg-indigo-100 transition-all cursor-pointer flex items-center gap-1.5">
+                            <i class="fas fa-plus"></i> 新对话
+                        </button>
+                        <button onclick="toggleFullscreen()" id="fullscreen-btn" class="px-3 py-1.5 bg-gray-50 text-gray-600 rounded-lg text-xs font-medium hover:bg-gray-100 transition-all cursor-pointer flex items-center gap-1.5">
+                            <i class="fas fa-expand"></i> 全屏
+                        </button>
+                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                            <span class="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5"></span>
+                            Online
+                        </span>
+                    </div>
+                </div>
+                
+                <div id="chat-messages" class="h-64 overflow-y-auto mb-4 space-y-4 bg-gray-50 rounded-xl p-4">
+                    <div class="text-center text-gray-400 text-sm py-4">
+                        <i class="fas fa-comments text-3xl mb-2 opacity-50 block"></i>
+                        <p>开始对话，GT Agent 会根据知识库为您提供帮助</p>
+                    </div>
+                </div>
+                
+                <div class="mb-2">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs text-gray-400"><i class="fas fa-upload"></i> 拖拽文件到聊天区域上传（支持 Word、Excel、图片）</span>
+                        <button onclick="document.getElementById('chat-file-input').click()" class="text-xs text-indigo-500 hover:text-indigo-600 cursor-pointer">点击上传</button>
+                    </div>
+                    <input id="chat-file-input" type="file" multiple accept=".docx,.xlsx,.jpg,.jpeg,.png,.gif,.txt,.md" class="hidden" onchange="handleFileSelect(this)">
+                    <div id="uploaded-files" class="flex flex-wrap gap-2"></div>
+                </div>
+                
+                <div class="flex gap-3">
+                    <input id="chat-input" type="text" placeholder="输入您的问题..." class="flex-1 px-4 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" onkeydown="if(event.key==='Enter')sendMessage()">
+                    <button onclick="sendMessage()" id="send-btn" class="px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl text-sm hover:from-indigo-600 hover:to-purple-700 transition-all cursor-pointer flex items-center gap-2">
+                        <i class="fas fa-paper-plane"></i> 发送
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 mb-6 hide-on-fullscreen">
+            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
+                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-400 to-indigo-600 flex items-center justify-center">
+                        <i class="fas fa-comments text-white"></i>
+                    </div>
+                    <div>
+                        <div class="font-semibold text-gray-800">Conversations</div>
+                        <div class="text-xs text-gray-500" id="conv-count">0 条对话</div>
+                    </div>
+                </div>
+                <div id="conv-list" class="max-h-48 overflow-y-auto">
+                    <div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-comments text-2xl mb-1 opacity-50 block"></i>暂无对话</div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
+                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center">
+                        <i class="fas fa-user text-white"></i>
+                    </div>
+                    <div>
+                        <div class="font-semibold text-gray-800">用户画像</div>
+                        <div class="text-xs text-gray-500">自动学习您的偏好</div>
+                    </div>
+                </div>
+                <div id="mem-list" class="max-h-48 overflow-y-auto text-sm">
+                    <div class="text-center py-4 text-gray-400"><i class="fas fa-user text-2xl mb-1 opacity-50 block"></i>暂无画像</div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
+                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center">
+                        <i class="fas fa-clock text-white"></i>
+                    </div>
+                    <div>
+                        <div class="font-semibold text-gray-800">待办任务</div>
+                        <div class="text-xs text-gray-500" id="task-count">0 个待办</div>
+                    </div>
+                </div>
+                <div id="task-list" class="max-h-48 overflow-y-auto">
+                    <div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-check-circle text-2xl mb-1 opacity-50 block"></i>暂无待办</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6 hide-on-fullscreen">
+            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
+                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+                        <i class="fas fa-folder-open text-white"></i>
+                    </div>
+                    <div>
+                        <div class="font-semibold text-gray-800">Projects</div>
+                        <div class="text-xs text-gray-500" id="proj-count">0 个项目</div>
+                    </div>
+                </div>
+                <div id="proj-list" class="max-h-64 overflow-y-auto">
+                    <div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-folder-open text-2xl mb-1 opacity-50 block"></i>暂无项目</div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
+                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center">
+                        <i class="fas fa-search text-white"></i>
+                    </div>
+                    <div class="font-semibold text-gray-800">搜索知识库</div>
+                </div>
+                <div class="flex gap-2 mb-3">
+                    <input id="search-input" type="text" placeholder="输入关键词搜索..." class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" onkeydown="if(event.key==='Enter')doSearch()">
+                    <button onclick="doSearch()" class="px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm hover:bg-indigo-600 transition-colors cursor-pointer">
+                        <i class="fas fa-search"></i>
+                    </button>
+                </div>
+                <div id="search-results" class="max-h-48 overflow-y-auto">
+                    <div class="text-center py-4 text-gray-400 text-sm">输入关键词搜索记忆、项目、任务</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-5 hide-on-fullscreen">
+            <div class="bg-white/10 backdrop-blur rounded-2xl p-5 text-center">
+                <i class="fas fa-upload text-white text-3xl mb-2"></i>
+                <div class="text-white font-semibold mb-1">Uploads</div>
+                <div class="text-white/70 text-xs mb-3" id="upload-count">0 个文件</div>
+                <input type="file" id="file-input-footer" class="hidden" onchange="uploadFile()">
+                <button onclick="document.getElementById('file-input-footer').click()" class="px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-lg text-sm cursor-pointer transition-all">
+                    <i class="fas fa-cloud-upload-alt"></i> 上传文件
+                </button>
+            </div>
+
+            <div class="bg-white/10 backdrop-blur rounded-2xl p-5 text-center">
+                <i class="fas fa-vector-square text-white text-3xl mb-2"></i>
+                <div class="text-white font-semibold mb-1">Vector Store</div>
+                <div class="text-white/70 text-xs mb-3" id="vector-status">FAISS 索引</div>
+                <div class="text-white/50 text-xs">向量检索引擎</div>
+            </div>
+
+            <div class="bg-white/10 backdrop-blur rounded-2xl p-5 text-center">
+                <i class="fas fa-project-diagram text-white text-3xl mb-2"></i>
+                <div class="text-white font-semibold mb-1">Agent Flow</div>
+                <div class="text-white/70 text-xs mb-3">用户输入 → 对话 → 记忆 → 检索</div>
+                <div class="text-white/50 text-xs">Qwen + LangChain</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="detail-modal" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl w-full max-w-3xl max-h-[80vh] overflow-hidden flex flex-col shadow-2xl">
+            <div class="flex items-center justify-between p-5 border-b border-gray-100">
+                <div class="flex items-center gap-3">
+                    <div id="modal-icon" class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white">
+                        <i class="fas fa-file-alt"></i>
+                    </div>
+                    <div>
+                        <div id="modal-title" class="font-semibold text-gray-800 text-lg"></div>
+                        <div id="modal-subtitle" class="text-xs text-gray-500"></div>
+                    </div>
+                </div>
+                <button onclick="closeModal()" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-500 transition-colors cursor-pointer">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="modal-content" class="p-5 overflow-y-auto flex-1 prose prose-sm max-w-none"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentConvId = null;
+        let uploadedFiles = [];
+
+        function toggleFullscreen() {
+            const container = document.getElementById('chat-container');
+            const btn = document.getElementById('fullscreen-btn');
+            const messages = document.getElementById('chat-messages');
+            
+            if (container.classList.contains('fullscreen')) {
+                container.classList.remove('fullscreen');
+                btn.innerHTML = '<i class="fas fa-expand"></i> 全屏';
+                messages.style.height = '';
+            } else {
+                container.classList.add('fullscreen');
+                btn.innerHTML = '<i class="fas fa-compress"></i> 退出全屏';
+                loadConversations();
+            }
+        }
+
+        function handleChatDragOver(event) {
+            event.preventDefault();
+            const container = document.getElementById('chat-container');
+            container.classList.add('border-2', 'border-indigo-500', 'bg-indigo-50');
+        }
+
+        function handleChatDragLeave(event) {
+            event.preventDefault();
+            const container = document.getElementById('chat-container');
+            container.classList.remove('border-2', 'border-indigo-500', 'bg-indigo-50');
+        }
+
+        function handleChatDrop(event) {
+            event.preventDefault();
+            const container = document.getElementById('chat-container');
+            container.classList.remove('border-2', 'border-indigo-500', 'bg-indigo-50');
+            
+            const files = event.dataTransfer.files;
+            if (files.length > 0) {
+                Array.from(files).forEach(file => addUploadedFile(file));
+            }
+        }
+
+        function handleFileSelect(input) {
+            if (input.files.length > 0) {
+                Array.from(input.files).forEach(file => addUploadedFile(file));
+            }
+            input.value = '';
+        }
+
+        function handleDrop(event) {
+            const files = event.dataTransfer.files;
+            if (files.length > 0) {
+                Array.from(files).forEach(file => addUploadedFile(file));
+            }
+        }
+
+        function addUploadedFile(file) {
+            const fileId = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            uploadedFiles.push({ id: fileId, file: file });
+            
+            const iconClass = getFileIcon(file.name);
+            const fileDiv = document.createElement('div');
+            fileDiv.id = `file-${fileId}`;
+            fileDiv.className = 'flex items-center gap-2 px-3 py-1.5 bg-gray-100 rounded-lg text-xs';
+            fileDiv.innerHTML = `
+                <i class="fas ${iconClass} text-indigo-500"></i>
+                <span class="text-gray-700 truncate max-w-[120px]">${file.name}</span>
+                <button onclick="removeUploadedFile('${fileId}')" class="text-gray-400 hover:text-red-500"><i class="fas fa-times"></i></button>
+            `;
+            
+            document.getElementById('uploaded-files').appendChild(fileDiv);
+        }
+
+        function removeUploadedFile(fileId) {
+            uploadedFiles = uploadedFiles.filter(f => f.id !== fileId);
+            const el = document.getElementById(`file-${fileId}`);
+            if (el) el.remove();
+        }
+
+        function getFileIcon(filename) {
+            const ext = filename.toLowerCase().split('.').pop();
+            const icons = {
+                'docx': 'fa-file-word',
+                'doc': 'fa-file-word',
+                'xlsx': 'fa-file-excel',
+                'xls': 'fa-file-excel',
+                'jpg': 'fa-file-image',
+                'jpeg': 'fa-file-image',
+                'png': 'fa-file-image',
+                'gif': 'fa-file-image',
+                'txt': 'fa-file-alt',
+                'md': 'fa-file-markdown',
+                'pdf': 'fa-file-pdf'
+            };
+            return icons[ext] || 'fa-file';
+        }
+
+        async function newConversation() {
+            try {
+                const res = await fetch('/api/conversations', { method: 'POST' });
+                const data = await res.json();
+                currentConvId = data.id;
+                document.getElementById('chat-messages').innerHTML = `
+                    <div class="text-center text-gray-400 text-sm py-4">
+                        <i class="fas fa-comments text-3xl mb-2 opacity-50 block"></i>
+                        <p>新对话已创建，开始输入您的问题</p>
+                    </div>`;
+                document.getElementById('chat-conv-info').textContent = `对话 ID: ${currentConvId}`;
+                loadConversations();
+            } catch (e) {
+                console.error('创建对话失败:', e);
+            }
+        }
+
+        async function checkHealth() {
+            const el = document.getElementById('health-status');
+            try {
+                const res = await fetch('/api/health');
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    el.className = 'bg-green-500/80 px-4 py-2 rounded-full text-white text-sm';
+                    el.innerHTML = `<i class="fas fa-heartbeat"></i> ${data.message}`;
+                }
+            } catch {
+                el.innerHTML = `<i class="fas fa-heartbeat"></i> 离线`;
+            }
+        }
+
+        async function loadConversations() {
+            try {
+                const res = await fetch('/api/conversations');
+                const data = await res.json();
+                const el = document.getElementById('conv-list');
+                const count = document.getElementById('conv-count');
+                count.textContent = `${data.length} 条对话`;
+                
+                const fullscreenEl = document.getElementById('fullscreen-conv-list');
+                const fullscreenCount = document.getElementById('fullscreen-conv-count');
+                fullscreenCount.textContent = `${data.length} 条`;
+                
+                const itemHtml = data.map(d => {
+                    const preview = d.preview || d.id;
+                    const isActive = d.id === currentConvId;
+                    return `<div onclick="showConversation('${d.id}')" class="flex items-center gap-2 py-2 px-2 border-b border-gray-100 last:border-0 text-sm cursor-pointer hover:bg-gray-50 transition-colors rounded-lg ${isActive ? 'bg-indigo-50' : ''}"><i class="fas fa-comment-dots text-blue-400 flex-shrink-0"></i><div class="flex-1 min-w-0"><div class="text-gray-700 truncate">${escapeHtml(preview)}</div><div class="text-xs text-gray-400">${d.created_at}</div></div><i class="fas fa-chevron-right text-gray-400 text-xs flex-shrink-0"></i></div>`;
+                }).join('');
+                
+                if (!data.length) {
+                    el.innerHTML = '<div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-comments text-2xl mb-1 opacity-50 block"></i>暂无对话</div>';
+                    fullscreenEl.innerHTML = '<div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-comments text-2xl mb-1 opacity-50 block"></i>暂无对话</div>';
+                    return;
+                }
+                
+                el.innerHTML = itemHtml;
+                fullscreenEl.innerHTML = itemHtml;
+            } catch {}
+        }
+
+        async function loadMemory() {
+            try {
+                const res = await fetch('/api/memory/user_profile');
+                const data = await res.json();
+                const el = document.getElementById('mem-list');
+                if (!data) { el.innerHTML = '<div class="text-center py-4 text-gray-400"><i class="fas fa-user text-2xl mb-1 opacity-50 block"></i>暂无画像</div>'; return; }
+                el.innerHTML = markdownToHtml(data.content);
+            } catch {}
+        }
+
+        async function loadTasks() {
+            try {
+                const res = await fetch('/api/tasks/pending');
+                const data = await res.json();
+                const el = document.getElementById('task-list');
+                const count = document.getElementById('task-count');
+                count.textContent = `${data.count} 个待办`;
+                if (!data.count) { el.innerHTML = '<div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-check-circle text-2xl mb-1 opacity-50 block"></i>暂无待办</div>'; return; }
+                el.innerHTML = data.tasks.map(task => `
+                    <div class="py-3 border-b border-gray-100 last:border-0">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs font-medium text-orange-600">${task.id}</span>
+                            <span class="text-xs text-gray-400">${task.created_at}</span>
+                        </div>
+                        <div class="space-y-1">
+                            ${task.steps.map(step => `<div class="flex items-start gap-2 text-sm"><i class="fas fa-circle text-xs text-orange-400 mt-1"></i><span class="text-gray-600">${step}</span></div>`).join('')}
+                        </div>
+                    </div>
+                `).join('');
+            } catch {}
+        }
+
+        async function loadProjects() {
+            try {
+                const res = await fetch('/api/projects');
+                const data = await res.json();
+                const el = document.getElementById('proj-list');
+                const count = document.getElementById('proj-count');
+                count.textContent = `${data.length} 个项目`;
+                if (!data.length) { el.innerHTML = '<div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-folder-open text-2xl mb-1 opacity-50 block"></i>暂无项目</div>'; return; }
+                el.innerHTML = data.map(p => `<div class="py-2 border-b border-gray-100 last:border-0"><div onclick="showProjectDocs('${p.name}')" class="flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer hover:text-indigo-600 transition-colors"><i class="fas fa-code-branch text-indigo-400"></i>${p.name}<i class="fas fa-chevron-right ml-auto text-gray-400 text-xs"></i></div><div class="ml-6 mt-1 text-xs text-gray-400">${p.docs.join(', ') || '无文档'}</div></div>`).join('');
+            } catch {}
+        }
+
+        async function doSearch() {
+            const q = document.getElementById('search-input').value.trim();
+            if (!q) return;
+            const el = document.getElementById('search-results');
+            el.innerHTML = '<div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-spinner fa-spin"></i> 搜索中...</div>';
+            try {
+                const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+                const data = await res.json();
+                if (!data.results.length) { el.innerHTML = '<div class="text-center py-4 text-gray-400 text-sm">未找到相关内容</div>'; return; }
+                el.innerHTML = data.results.map(r => `<div class="py-2 border-b border-gray-100 last:border-0 text-sm"><i class="fas fa-file-alt text-cyan-400 mr-2"></i><span class="text-gray-600">${r.path}</span><span class="ml-2 px-2 py-0.5 bg-cyan-100 text-cyan-700 rounded text-xs">${r.type}</span></div>`).join('');
+            } catch { el.innerHTML = '<div class="text-center py-4 text-red-400 text-sm">搜索失败</div>'; }
+        }
+
+        async function uploadFile() {
+            const input = document.getElementById('file-input');
+            if (!input.files.length) return;
+            const formData = new FormData();
+            formData.append('file', input.files[0]);
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                alert(`上传成功: ${data.file} (${data.size} bytes)`);
+                refreshAll();
+            } catch { alert('上传失败'); }
+        }
+
+        function addMessage(role, content, contextUsed = false, isMarkdown = true) {
+            const container = document.getElementById('chat-messages');
+            const isUser = role === 'user';
+            
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`;
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = `max-w-[80%] px-4 py-3 rounded-xl ${isUser ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-tr-none' : 'bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm'}`;
+            
+            if (!isUser && contextUsed) {
+                const badge = document.createElement('span');
+                badge.className = 'inline-block px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs mb-2';
+                badge.textContent = '📚 已检索知识库';
+                contentDiv.appendChild(badge);
+            }
+            
+            const text = document.createElement('div');
+            text.className = isUser ? 'text-sm whitespace-pre-wrap' : 'text-sm whitespace-pre-wrap markdown-content';
+            
+            if (isUser) {
+                text.textContent = content;
+            } else if (isMarkdown) {
+                text.innerHTML = markdownToHtml(content);
+            } else {
+                text.textContent = content;
+            }
+            
+            contentDiv.appendChild(text);
+            msgDiv.appendChild(contentDiv);
+            
+            if (container.innerHTML.includes('fas fa-comments')) {
+                container.innerHTML = '';
+            }
+            container.appendChild(msgDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function addThinkingProcess(planSteps, trace) {
+            const container = document.getElementById('chat-messages');
+            if (container.innerHTML.includes('fas fa-comments')) {
+                container.innerHTML = '';
+            }
+            
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'flex justify-start mb-4';
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'max-w-[90%] px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 rounded-tl-none';
+            
+            const header = document.createElement('div');
+            header.className = 'flex items-center gap-2 mb-3 pb-2 border-b border-amber-200';
+            header.innerHTML = `<i class="fas fa-brain text-amber-500"></i><span class="text-xs font-semibold text-amber-700">Agent 思考过程</span><span class="ml-auto text-xs text-amber-600">计划 ${planSteps} 步</span>`;
+            contentDiv.appendChild(header);
+            
+            const timeline = document.createElement('div');
+            timeline.className = 'space-y-3';
+            
+            trace.forEach((step, index) => {
+                const stepDiv = document.createElement('div');
+                stepDiv.className = 'relative pl-6';
+                
+                const dot = document.createElement('div');
+                dot.className = `absolute left-0 top-1 w-3 h-3 rounded-full ${step.status === 'success' ? 'bg-green-500' : 'bg-red-500'}`;
+                stepDiv.appendChild(dot);
+                
+                const line = document.createElement('div');
+                line.className = 'absolute left-1.5 top-4 w-0.5 h-full bg-amber-200';
+                stepDiv.appendChild(line);
+                
+                const stepContent = document.createElement('div');
+                
+                const stepHeader = document.createElement('div');
+                stepHeader.className = 'flex items-center gap-2 mb-1';
+                stepHeader.innerHTML = `<span class="text-xs font-semibold text-amber-600">步骤 ${index + 1}</span><span class="text-xs text-gray-500">${step.step}</span>`;
+                stepContent.appendChild(stepHeader);
+                
+                const toolInfo = document.createElement('div');
+                toolInfo.className = 'flex items-center gap-2 text-xs mb-1';
+                const toolBadge = `<span class="px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded font-medium">${step.tool}</span>`;
+                const argsStr = step.args ? `参数: ${JSON.stringify(step.args)}` : '';
+                toolInfo.innerHTML = `${toolBadge}${argsStr}`;
+                stepContent.appendChild(toolInfo);
+                
+                const resultDiv = document.createElement('div');
+                resultDiv.className = `text-sm ${step.status === 'success' ? 'text-green-700' : 'text-red-600'}`;
+                resultDiv.textContent = step.result;
+                stepContent.appendChild(resultDiv);
+                
+                stepDiv.appendChild(stepContent);
+                timeline.appendChild(stepDiv);
+            });
+            
+            if (trace.length === 0) {
+                const noTrace = document.createElement('div');
+                noTrace.className = 'text-center text-gray-400 text-xs py-2';
+                noTrace.textContent = '直接回答，无需工具操作';
+                timeline.appendChild(noTrace);
+            }
+            
+            contentDiv.appendChild(timeline);
+            msgDiv.appendChild(contentDiv);
+            container.appendChild(msgDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('chat-input');
+            const btn = document.getElementById('send-btn');
+            const message = input.value.trim();
+            
+            if (!message && uploadedFiles.length === 0) return;
+            
+            let displayMessage = message;
+            if (uploadedFiles.length > 0) {
+                const fileNames = uploadedFiles.map(f => f.file.name).join(', ');
+                displayMessage = `${message || ''} (上传了 ${uploadedFiles.length} 个文件: ${fileNames})`;
+            }
+            
+            addMessage('user', displayMessage);
+            input.value = '';
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 思考中...';
+            
+            let statusEl = null;
+            let currentTrace = [];
+            let currentPlanSteps = 0;
+            let assistantMsgEl = null;
+            let assistantText = '';
+            
+            try {
+                const formData = new FormData();
+                if (message) formData.append('message', message);
+                if (currentConvId) formData.append('conversation_id', currentConvId);
+                
+                uploadedFiles.forEach(item => {
+                    formData.append('files', item.file);
+                });
+                
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                uploadedFiles = [];
+                document.getElementById('uploaded-files').innerHTML = '';
+                
+                if (!res.ok) {
+                    const error = await res.json();
+                    addMessage('assistant', `❌ 错误: ${error.detail}`);
+                    return;
+                }
+                
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    buffer += decoder.decode(value, { stream: true });
+                    
+                    while (buffer.includes('\n\n')) {
+                        const idx = buffer.indexOf('\n\n');
+                        const eventData = buffer.substring(0, idx).trim();
+                        buffer = buffer.substring(idx + 2);
+                        
+                        if (eventData.startsWith('data: ')) {
+                            try {
+                                const jsonStr = eventData.substring(6);
+                                const event = JSON.parse(jsonStr);
+                                
+                                handleStreamEvent(event);
+                            } catch (e) {
+                                console.error('解析事件失败:', e);
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                addMessage('assistant', '❌ 连接失败，请检查服务是否正常运行');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-paper-plane"></i> 发送';
+                if (statusEl) statusEl.remove();
+            }
+            
+            function handleStreamEvent(event) {
+                const container = document.getElementById('chat-messages');
+                
+                if (event.type === 'status') {
+                    btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${event.message}`;
+                    
+                    if (statusEl) statusEl.remove();
+                    
+                    statusEl = document.createElement('div');
+                    statusEl.className = 'flex justify-start mb-4';
+                    statusEl.innerHTML = `
+                        <div class="max-w-[80%] px-4 py-2 rounded-xl bg-blue-50 border border-blue-200 rounded-tl-none">
+                            <div class="flex items-center gap-2 text-sm text-blue-700">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                                <span>${event.message}</span>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(statusEl);
+                    container.scrollTop = container.scrollHeight;
+                }
+                
+                if (event.type === 'plan') {
+                    currentPlanSteps = event.plan_steps;
+                    currentTrace = [];
+                    
+                    if (statusEl) statusEl.remove();
+                    
+                    const planDiv = document.createElement('div');
+                    planDiv.className = 'flex justify-start mb-4';
+                    planDiv.innerHTML = `
+                        <div class="max-w-[90%] px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 rounded-tl-none">
+                            <div class="flex items-center gap-2 mb-3 pb-2 border-b border-amber-200">
+                                <i class="fas fa-brain text-amber-500"></i>
+                                <span class="text-xs font-semibold text-amber-700">Agent 思考过程</span>
+                                <span class="ml-auto text-xs text-amber-600">计划 ${currentPlanSteps} 步</span>
+                            </div>
+                            <div class="space-y-2">
+                                ${event.steps.map((step, i) => `
+                                    <div class="flex items-center gap-2 text-sm">
+                                        <span class="w-5 h-5 flex items-center justify-center bg-amber-200 text-amber-700 rounded-full text-xs font-semibold">${i + 1}</span>
+                                        <span class="text-gray-700">${step.step}</span>
+                                        <span class="ml-auto px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded text-xs">${step.tool}</span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(planDiv);
+                    container.scrollTop = container.scrollHeight;
+                }
+                
+                if (event.type === 'trace') {
+                    currentTrace.push(event.step);
+                    
+                    if (statusEl) statusEl.remove();
+                    
+                    const traceDiv = document.createElement('div');
+                    traceDiv.className = 'flex justify-start mb-4';
+                    const statusColor = event.step.status === 'success' ? 'green' : 'red';
+                    const statusIcon = event.step.status === 'success' ? 'check-circle' : 'exclamation-circle';
+                    
+                    traceDiv.innerHTML = `
+                        <div class="max-w-[90%] px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 rounded-tl-none">
+                            <div class="flex items-center gap-2 mb-2">
+                                <i class="fas fa-${statusIcon} text-${statusColor}-500"></i>
+                                <span class="text-xs font-semibold text-${statusColor}-600">${event.step.status === 'success' ? '执行成功' : '执行失败'}</span>
+                                <span class="ml-auto text-xs text-gray-400">${event.step.tool}</span>
+                            </div>
+                            <div class="text-sm text-gray-700 mb-2">${event.step.step}</div>
+                            <div class="text-xs text-gray-500">
+                                ${event.step.args ? `<div>参数: ${JSON.stringify(event.step.args)}</div>` : ''}
+                                <div>结果: ${event.step.result}</div>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(traceDiv);
+                    container.scrollTop = container.scrollHeight;
+                }
+                
+                if (event.type === 'token') {
+                    if (!assistantMsgEl) {
+                        const msgDiv = document.createElement('div');
+                        msgDiv.className = 'flex justify-start mb-4';
+                        
+                        const contentDiv = document.createElement('div');
+                        contentDiv.className = 'max-w-[80%] px-4 py-3 rounded-xl bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm';
+                        
+                        const text = document.createElement('div');
+                        text.className = 'text-sm whitespace-pre-wrap markdown-content';
+                        text.textContent = '';
+                        
+                        contentDiv.appendChild(text);
+                        msgDiv.appendChild(contentDiv);
+                        
+                        if (container.innerHTML.includes('fas fa-comments')) {
+                            container.innerHTML = '';
+                        }
+                        container.appendChild(msgDiv);
+                        
+                        assistantMsgEl = text;
+                    }
+                    
+                    assistantText += event.content;
+                    assistantMsgEl.textContent = assistantText;
+                    container.scrollTop = container.scrollHeight;
+                }
+                
+                if (event.type === 'done') {
+                    if (event.conversation_id && !currentConvId) {
+                        currentConvId = event.conversation_id;
+                        document.getElementById('chat-conv-info').textContent = `对话 ID: ${currentConvId}`;
+                    }
+                    
+                    if (assistantMsgEl && assistantText) {
+                        assistantMsgEl.innerHTML = markdownToHtml(assistantText);
+                        container.scrollTop = container.scrollHeight;
+                    } else if (event.response) {
+                        addMessage('assistant', event.response, event.context_used);
+                    }
+                    
+                    refreshAll();
+                }
+            }
+        }
+
+        function refreshAll() {
+            checkHealth();
+            loadConversations();
+            loadMemory();
+            loadTasks();
+            loadProjects();
+        }
+
+        function closeModal() {
+            document.getElementById('detail-modal').classList.add('hidden');
+        }
+
+        function openModal(title, subtitle, content, iconClass, colorClass) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-subtitle').textContent = subtitle;
+            document.getElementById('modal-content').innerHTML = content;
+            document.getElementById('modal-icon').className = `w-10 h-10 rounded-xl ${colorClass} flex items-center justify-center text-white`;
+            document.getElementById('modal-icon').innerHTML = `<i class="${iconClass}"></i>`;
+            document.getElementById('detail-modal').classList.remove('hidden');
+        }
+
+        async function showConversation(convId) {
+            try {
+                const res = await fetch(`/api/conversations/${convId}`);
+                const data = await res.json();
+                
+                currentConvId = data.id || convId;
+                document.getElementById('chat-conv-info').textContent = `对话 ID: ${currentConvId}`;
+                
+                const container = document.getElementById('chat-messages');
+                container.innerHTML = '';
+                
+                data.messages.forEach(m => {
+                    addMessage(m.role, m.content, false, m.role !== 'user');
+                });
+                
+                loadConversations();
+            } catch (e) { console.error(e); }
+        }
+
+        async function showMemory(name) {
+            try {
+                const res = await fetch(`/api/memory/${name}`);
+                const data = await res.json();
+                openModal(name, '长期记忆', markdownToHtml(data.content), 'fas fa-brain', 'bg-gradient-to-br from-emerald-400 to-teal-600');
+            } catch (e) { console.error(e); }
+        }
+
+        async function showTask(name) {
+            try {
+                const res = await fetch(`/api/tasks/${name}`);
+                const data = await res.json();
+                openModal(name, '任务清单', markdownToHtml(data.content), 'fas fa-tasks', 'bg-gradient-to-br from-orange-400 to-red-500');
+            } catch (e) { console.error(e); }
+        }
+
+        async function showProjectDocs(projectName) {
+            try {
+                const res = await fetch('/api/projects');
+                const projects = await res.json();
+                const project = projects.find(p => p.name === projectName);
+                if (!project) return;
+                
+                let docsContent = '';
+                for (const doc of project.docs) {
+                    const docRes = await fetch(`/api/projects/${projectName}/${doc}`);
+                    const docData = await docRes.json();
+                    docsContent += `<div class="mb-6"><h3 class="font-semibold text-gray-800 mb-2">${doc}</h3>${markdownToHtml(docData.content)}</div>`;
+                }
+                
+                openModal(projectName, '项目文档', docsContent || '<div class="text-center text-gray-400 py-4">暂无文档</div>', 'fas fa-folder-open', 'bg-gradient-to-br from-indigo-500 to-purple-600');
+            } catch (e) { console.error(e); }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function markdownToHtml(md) {
+            if (typeof marked !== 'undefined') {
+                marked.setOptions({
+                    gfm: true,
+                    breaks: true
+                });
+                return marked.parse(md);
+            }
+            return md
+                .replace(/^###### (.*$)/gim, '<h6 class="text-xs font-bold text-gray-500 mt-3 mb-2">$1</h6>')
+                .replace(/^##### (.*$)/gim, '<h5 class="text-sm font-bold text-gray-600 mt-3 mb-2">$1</h5>')
+                .replace(/^#### (.*$)/gim, '<h4 class="text-base font-bold text-gray-700 mt-4 mb-2">$1</h4>')
+                .replace(/^### (.*$)/gim, '<h3 class="text-lg font-bold text-gray-800 mt-4 mb-2">$1</h3>')
+                .replace(/^## (.*$)/gim, '<h2 class="text-xl font-bold text-gray-800 mt-5 mb-3">$1</h2>')
+                .replace(/^# (.*$)/gim, '<h1 class="text-2xl font-bold text-gray-800 mt-6 mb-4">$1</h1>')
+                .replace(/```(\w+)?\n([\s\S]*?)```/gim, '<pre><code>$2</code></pre>')
+                .replace(/`([^`]+)`/gim, '<code class="bg-gray-100 px-1.5 py-0.5 rounded text-sm">$1</code>')
+                .replace(/\[([^\]]+)\]\(([^)]+)\)/gim, '<a href="$2" target="_blank" class="text-indigo-600 underline">$1</a>')
+                .replace(/^> (.*$)/gim, '<blockquote class="border-l-4 border-gray-300 pl-3 italic text-gray-600">$1</blockquote>')
+                .replace(/^- \[x\] (.*$)/gim, '<div class="flex items-center gap-2 text-green-600"><i class="fas fa-check-circle"></i><span>$1</span></div>')
+                .replace(/^- \[ \] (.*$)/gim, '<div class="flex items-center gap-2 text-gray-400"><i class="far fa-circle"></i><span>$1</span></div>')
+                .replace(/^\d+\. (.*$)/gim, '<div class="ml-4 text-gray-700">$1</div>')
+                .replace(/^- (.*$)/gim, '<div class="flex items-start gap-2"><span class="text-indigo-400 mt-1">•</span><span>$1</span></div>')
+                .replace(/---/gim, '<hr class="my-4 border-gray-200">')
+                .replace(/~~([^~]+)~~/gim, '<del class="line-through">$1</del>')
+                .replace(/\*\*(.*)\*\*/gim, '<strong class="font-bold">$1</strong>')
+                .replace(/\*(.*)\*/gim, '<em class="italic">$1</em>')
+                .replace(/\n/gim, '<br>');
+        }
+
+        document.addEventListener('DOMContentLoaded', refreshAll);
+    </script>
+</body>
+</html>
