@@ -51,6 +51,8 @@ def _build_planner_prompt(query: str) -> str:
 
     has_files = "文件:" in query or "【文件" in query
 
+    needs_scan = any(keyword in query for keyword in ["扫描项目", "项目结构", "目录结构", "文件列表", "查看目录", "查找文件", "分析代码", "页面文件"])
+
     prompt = f"""你是 GT Agent 的规划师。根据用户问题，制定详细的执行计划。
 
 用户问题: {query}
@@ -69,8 +71,20 @@ def _build_planner_prompt(query: str) -> str:
 ## 知识库上下文
 {context if context else "无"}
 
+## 防幻觉规则（强制遵守）
+1. 禁止猜测项目结构、目录内容、文件名
+2. 禁止根据需求文档推断文件路径或内容
+3. 禁止创建不存在的文件路径
+4. 禁止根据目录名称推断业务功能（如不能因目录名包含"data"就推断它是"实验室检查"页面）
+5. 当用户要求扫描项目、查看目录结构、分析代码时，必须调用 list_dir / read_file / search_file 工具获取真实结果
+6. 扫描项目结构时，**必须先调用 scan_menu_structure 工具**获取菜单和路由信息，这是定位真实页面路径的最准确方法
+7. list_dir 必须使用足够的深度（建议 max_depth=5-10），确保扫描到深层目录结构
+8. 如果工具没有返回结果，只能回答"无法访问本地文件系统，请检查路径是否正确或提供扫描权限"
+9. list_dir 的 path 参数必须是真实存在的绝对路径，如 'D:/projects/xxx'
+
 ## 重要提示
 {"用户已上传文件，文件内容已包含在用户问题中，请直接根据文件内容回答，不需要再调用 read_file 工具读取文件。" if has_files else ""}
+{"用户要求扫描项目或查看文件，必须调用 list_dir 或 read_file 工具获取真实文件系统结果，禁止编造目录结构或文件内容。" if needs_scan else ""}
 
 ## 要求
 1. 如果需要调用工具，将任务分解为多个步骤，每个步骤明确调用什么工具
@@ -123,6 +137,15 @@ def planner_node(state: AgentState) -> AgentState:
         cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
 
         direct_prompt = f"""你是 GT Agent，一个本地智能开发助手。
+
+## 防幻觉规则（强制遵守）
+1. 禁止猜测项目结构、目录内容、文件名
+2. 禁止根据需求文档推断文件路径或内容
+3. 禁止创建不存在的文件路径
+4. 禁止根据目录名称推断业务功能（如不能因目录名包含"data"就推断它是"实验室检查"页面）
+5. 如果需要查看文件内容或目录结构，必须通过工具获取，禁止编造
+6. 扫描项目结构时，必须先调用 scan_menu_structure 工具获取菜单和路由信息
+
 知识库上下文: {context}
 相关技能: {skill_context}
 可用能力: {cap_desc}
@@ -401,6 +424,15 @@ def run_graph_stream(query: str, conv_id: str = None):
         cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
 
         direct_prompt = f"""你是 GT Agent，一个本地智能开发助手。
+
+## 防幻觉规则（强制遵守）
+1. 禁止猜测项目结构、目录内容、文件名
+2. 禁止根据需求文档推断文件路径或内容
+3. 禁止创建不存在的文件路径
+4. 禁止根据目录名称推断业务功能（如不能因目录名包含"data"就推断它是"实验室检查"页面）
+5. 如果需要查看文件内容或目录结构，必须通过工具获取，禁止编造
+6. 扫描项目结构时，必须先调用 scan_menu_structure 工具获取菜单和路由信息
+
 知识库上下文: {context}
 相关技能: {skill_context}
 可用能力: {cap_desc}
@@ -514,6 +546,7 @@ def run_graph_stream(query: str, conv_id: str = None):
     config = {"configurable": {"thread_id": conv_id or "default"}}
     trace = []
     step_count = 0
+    final_state = None
 
     for event in graph.stream(
         {
@@ -541,9 +574,8 @@ def run_graph_stream(query: str, conv_id: str = None):
                     trace = current_trace
             elif node == "reviewer":
                 yield {"type": "status", "message": "正在评审结果..."}
+                final_state = state
 
-    final_state = list(graph.get_state(config).values())[0] if conv_id else None
-    
     if final_state:
         feedback = final_state.get("review_feedback", "")
         is_complete = final_state.get("is_complete", True)
