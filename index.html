@@ -177,8 +177,15 @@
                         <div class="text-xs text-gray-500">自动学习您的偏好</div>
                     </div>
                 </div>
-                <div id="mem-list" class="max-h-48 overflow-y-auto text-sm">
-                    <div class="text-center py-4 text-gray-400"><i class="fas fa-user text-2xl mb-1 opacity-50 block"></i>暂无画像</div>
+                <!-- 气泡容器：增加充足内边距、gap间隔防止遮挡，自适应wrap铺满容器 -->
+                <div id="mem-list" class="max-h-48 overflow-hidden bg-gray-50 rounded-xl p-4">
+                    <div class="text-center py-8 text-gray-400 mem-empty">
+                        <i class="fas fa-user text-3xl mb-2 opacity-50 block"></i>
+                        <span>暂无画像数据</span>
+                    </div>
+                    <!-- 气泡布局：均匀换行、固定gap间距，所有气泡完整展示无重叠遮挡 -->
+                    <div id="bubble-wrap" class="hidden w-full h-full flex flex-wrap items-center justify-center gap-3 content-center">
+                    </div>
                 </div>
             </div>
 
@@ -283,6 +290,12 @@
     <script>
         let currentConvId = null;
         let uploadedFiles = [];
+
+        marked.setOptions({
+            gfm: true,
+            breaks: true,
+            smartLists: true
+        });
 
         function toggleFullscreen() {
             const container = document.getElementById('chat-container');
@@ -438,14 +451,110 @@
             } catch {}
         }
 
-        async function loadMemory() {
+         async function loadMemory() {
             try {
                 const res = await fetch('/api/memory/user_profile');
                 const data = await res.json();
-                const el = document.getElementById('mem-list');
-                if (!data) { el.innerHTML = '<div class="text-center py-4 text-gray-400"><i class="fas fa-user text-2xl mb-1 opacity-50 block"></i>暂无画像</div>'; return; }
-                el.innerHTML = markdownToHtml(data.content);
-            } catch {}
+
+                const memWrap = document.getElementById('mem-list');
+                const emptyTip = memWrap.querySelector('.mem-empty');
+                const bubbleWrap = document.getElementById('bubble-wrap');
+                bubbleWrap.innerHTML = '';
+
+                if (!data || !data.content) {
+                    emptyTip.classList.remove('hidden');
+                    bubbleWrap.classList.add('hidden');
+                    return;
+                }
+
+                emptyTip.classList.add('hidden');
+                bubbleWrap.classList.remove('hidden');
+
+                let tagList = [];
+                // 1. 数组格式数据直接读取
+                if (Array.isArray(data.content)) {
+                    tagList = data.content;
+                }
+                // 2. 文本内容，兼容markdown标题/列表/普通逗号分割标签
+                else if (typeof data.content === 'string') {
+                    const markdownText = data.content;
+                    // 提取## 标题标签
+                    const headings = markdownText.match(/##\s+(.+)/g) || [];
+                    headings.forEach(item => {
+                        const label = item.replace(/##\s+/, '').trim();
+                        if(label) tagList.push({ label });
+                    })
+                    // 提取- 列表标签
+                    const lists = markdownText.match(/-\s+(.+)/g) || [];
+                    lists.forEach(item => {
+                        const label = item.replace(/-\s+/, '').trim();
+                        if(label) tagList.push({ label });
+                    })
+                    // 兜底普通逗号分割
+                    if(tagList.length === 0) {
+                        tagList = markdownText.split(/[,，、；;\n]+/)
+                            .map(s => s.trim())
+                            .filter(Boolean)
+                            .map(label => ({ label }));
+                    }
+                }
+
+                if(tagList.length === 0) {
+                    emptyTip.classList.remove('hidden');
+                    bubbleWrap.classList.add('hidden');
+                    return;
+                }
+
+                // 四组配色循环匹配示例图
+                const colorPool = [
+                    'bg-red-600 text-white',
+                    'bg-indigo-800 text-white',
+                    'bg-amber-500 text-gray-900',
+                    'bg-emerald-600 text-white'
+                ];
+
+                // 循环生成每个独立气泡
+                tagList.forEach((item, idx) => {
+                    const label = item.label;
+                    // 随机生成权重：无value则40~160随机，有value直接使用
+                    const weight = item.value ? Number(item.value) : Math.floor(Math.random() * 120 + 40);
+
+                    // 三级尺寸分级，限制最大宽度，保证容器放下不溢出
+                    let sizeClass, textClass;
+                    if(weight >= 130) {
+                        sizeClass = 'w-24 h-24';
+                        textClass = 'text-base';
+                    } else if(weight >= 70) {
+                        sizeClass = 'w-16 h-16';
+                        textClass = 'text-sm';
+                    } else {
+                        sizeClass = 'w-8 h-8';
+                        textClass = 'text-xs';
+                    }
+
+                    const colorClass = colorPool[idx % colorPool.length];
+                    const bubble = document.createElement('div');
+                    bubble.className = `rounded-full flex items-center justify-center ${sizeClass} ${colorClass} font-medium ${textClass} text-center p-1 break-words cursor-pointer hover:opacity-90 transition-all shadow-sm`;
+                    bubble.innerText = label;
+                    // 点击打开详情弹窗
+                    bubble.onclick = () => openModal(
+                        '用户画像详情',
+                        '长期记忆偏好',
+                        markdownToHtml(data.content),
+                        'fas fa-brain',
+                        'bg-gradient-to-br from-emerald-400 to-teal-600'
+                    );
+                    bubbleWrap.appendChild(bubble);
+                })
+
+            } catch (err) {
+                const memWrap = document.getElementById('mem-list');
+                const emptyTip = memWrap.querySelector('.mem-empty');
+                const bubbleWrap = document.getElementById('bubble-wrap');
+                emptyTip.classList.remove('hidden');
+                bubbleWrap.classList.add('hidden');
+                console.error('加载用户画像失败', err);
+            }
         }
 
         async function loadTasks() {
@@ -635,8 +744,9 @@
             let statusEl = null;
             let currentTrace = [];
             let currentPlanSteps = 0;
-            let assistantMsgEl = null;
-            let assistantText = '';
+            let assistantMsgWrap = null;   // 新增
+            let assistantHtmlBox = null;   // 新增
+            let fullMarkdownText = '';     // 新增
             
             try {
                 const formData = new FormData();
@@ -777,46 +887,42 @@
                 }
                 
                 if (event.type === 'token') {
-                    if (!assistantMsgEl) {
-                        const msgDiv = document.createElement('div');
-                        msgDiv.className = 'flex justify-start mb-4';
+                    // 首次创建回复气泡
+                    if (!assistantMsgWrap) {
+                        if (statusEl) statusEl.remove();
                         
-                        const contentDiv = document.createElement('div');
-                        contentDiv.className = 'max-w-[80%] px-4 py-3 rounded-xl bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm';
+                        assistantMsgWrap = document.createElement('div');
+                        assistantMsgWrap.className = 'flex justify-start mb-4';
                         
-                        const text = document.createElement('div');
-                        text.className = 'text-sm whitespace-pre-wrap markdown-content';
-                        text.textContent = '';
+                        const contentWrap = document.createElement('div');
+                        contentWrap.className = 'max-w-[80%] px-4 py-3 rounded-xl bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm';
                         
-                        contentDiv.appendChild(text);
-                        msgDiv.appendChild(contentDiv);
+                        assistantHtmlBox = document.createElement('div');
+                        assistantHtmlBox.className = 'text-sm markdown-content';
+                        
+                        contentWrap.appendChild(assistantHtmlBox);
+                        assistantMsgWrap.appendChild(contentWrap);
                         
                         if (container.innerHTML.includes('fas fa-comments')) {
                             container.innerHTML = '';
                         }
-                        container.appendChild(msgDiv);
-                        
-                        assistantMsgEl = text;
+                        container.appendChild(assistantMsgWrap);
                     }
-                    
-                    assistantText += event.content;
-                    assistantMsgEl.textContent = assistantText;
+                    // 累加文本并实时转Markdown
+                    fullMarkdownText += event.content;
+                    assistantHtmlBox.innerHTML = marked.parse(fullMarkdownText);
                     container.scrollTop = container.scrollHeight;
                 }
-                
+
                 if (event.type === 'done') {
                     if (event.conversation_id && !currentConvId) {
                         currentConvId = event.conversation_id;
                         document.getElementById('chat-conv-info').textContent = `对话 ID: ${currentConvId}`;
                     }
-                    
-                    if (assistantMsgEl && assistantText) {
-                        assistantMsgEl.innerHTML = markdownToHtml(assistantText);
-                        container.scrollTop = container.scrollHeight;
-                    } else if (event.response) {
+                    // 兜底兼容无流式场景
+                    if (!fullMarkdownText && event.response) {
                         addMessage('assistant', event.response, event.context_used);
                     }
-                    
                     refreshAll();
                 }
             }
