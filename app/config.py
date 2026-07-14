@@ -20,6 +20,8 @@ SCAN_IGNORE_DIRS = {
     "dist",
     "build",
     ".git",
+    ".svn",
+    ".hg",
     ".idea",
     ".vscode",
     "coverage",
@@ -75,4 +77,4 @@ TEMPERATURE_PLANNING = float(os.getenv("TEMPERATURE_PLANNING", "0.1"))   # plann
 TEMPERATURE_CHAT = float(os.getenv("TEMPERATURE_CHAT", "0.7"))           # 直接回答/summary 用较高温度
 
 # ─── Agent 循环控制 ───
-MAX_STEPS = int(os.getenv("MAX_STEPS", "5"))   # executor-reviewer 最大循环次数
+MAX_STEPS = int(os.getenv("MAX_STEPS", "10"))   # executor-reviewer 最大循环次数

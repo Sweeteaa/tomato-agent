@@ -76,7 +76,9 @@ async def chat_with_agent_stream(query: str, conv_id: Optional[str] = None, file
 
     final_result = None
 
-    async for event in run_graph_stream(query_with_context, conv_id, images=image_list if image_list else None):
+    async for event in run_graph_stream(query_with_context, conv_id,
+                                        images=image_list if image_list else None,
+                                        has_uploaded_files=bool(file_info)):
         if event["type"] == "done":
             final_result = event
             event["files_uploaded"] = uploaded_filenames

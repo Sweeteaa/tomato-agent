@@ -78,6 +78,33 @@ def _build_planner_prompt(query: str, context: str = None, skill_context: str = 
 ## 可用能力
 {cap_desc}
 
+## 可用工具完整列表（只能使用以下工具，禁止使用不在此列表的工具）
+- read_file(path, max_size) — 读取文件内容，支持绝对路径和相对路径
+- list_dir(path, recursive, max_depth) — 列出目录内容，支持绝对路径和相对路径
+- search_file(keyword, root_path, file_extensions, context_lines, max_results) — 搜索项目源码，返回匹配行号和上下文代码（定位业务页面最精准的方式）
+- scan_menu_structure(project_path) — 扫描菜单和路由配置
+- scan_project(project_path 或 name, full_scan) — 深度扫描项目结构（推荐传 project_path）
+- list_registered_projects() — 列出已注册项目
+- get_project_info(name) — 获取已注册项目元数据
+- list_project_docs() — 列出项目文档
+- get_project_doc(project, doc) — 读取项目文档
+- write_file(path, content) — 写入文件（仅 workspace 内）
+- delete_file(path) — 删除文件（仅 workspace 内）
+- append_file(path, content) — 追加内容（仅 workspace 内）
+- create_folder(path) — 创建文件夹（仅 workspace 内）
+- save_skill(name, content) — 保存技能文档
+- read_skill(name) — 读取技能文档
+- list_skills() — 列出所有技能
+- save_task(name, content) — 保存任务清单
+- read_task(name) — 读取任务清单
+- list_tasks() — 列出所有任务
+- save_memory(name, content) — 保存记忆
+- read_memory(name) — 读取记忆
+- list_memory() — 列出所有记忆
+- delete_memory(name) — 删除记忆
+
+**禁止使用不在上述列表中的工具名（如 http_request、search_files、execute_command 等均不存在）**
+
 ## 相关技能
 {skill_context if skill_context else "无"}
 
@@ -87,20 +114,41 @@ def _build_planner_prompt(query: str, context: str = None, skill_context: str = 
 {ANTI_HALLUCINATION_RULES}
 
 ## 路径规则（重要！）
-- **扫描用户项目**: 使用绝对路径，如 list_dir(path='D:/projects/xxx'), read_file(path='D:/projects/xxx/src/App.vue'), scan_menu_structure(project_path='D:/projects/xxx')
+- **扫描用户项目**: 使用绝对路径，如 list_dir(path='/Users/xxx/projects/xxx'), read_file(path='/Users/xxx/projects/xxx/src/App.vue'), scan_project(project_path='/Users/xxx/projects/xxx')
 - **workspace 内操作**: 使用相对路径（不需要加 workspace 前缀），如 write_file(path='skill/hello.md'), save_skill(name='xxx', content='...')
 - read_file 和 list_dir 同时支持绝对路径和相对路径
+- scan_project 推荐使用 project_path 参数（绝对路径），无需注册即可扫描
 - write_file / delete_file / append_file / create_folder 只支持 workspace 相对路径
+
+## 项目代码分析策略（重要！）
+当用户要求"分析项目"、"结合项目修改需求"时，按以下策略规划步骤：
+
+### 推荐工作流
+1. **scan_project(project_path=项目绝对路径)** — 获取项目概览（框架、技术栈、页面/组件数量）
+2. **search_file(keyword='业务关键词', root_path=项目路径)** — 用需求中的字段名/业务术语搜索源码，直接定位需修改的文件
+3. **read_file(path=搜索到的文件绝对路径)** — 读取匹配文件的具体内容
+
+### 关键原则
+- **禁止读取 scan_project 生成的 .md 文档**（如 routes.md, overview.md）——这些是中间产物，信息有损。直接搜索源码更准确
+- **动态路由陷阱**：很多项目的路由是后端返回动态添加的（如 router.addRoute()），静态路由文件只包含 /login、/home 等基础路由。**不要依赖路由文件定位业务页面**
+- **用需求关键词搜索源码**：从需求文档中提取字段名、业务术语作为 keyword。例如：
+  - 需求提到"数据看板" → search_file(keyword='数据看板,data-board,databoard', root_path=项目路径)
+  - 需求提到"病灶编号" → search_file(keyword='病灶编号,US-1,lesion', root_path=项目路径, file_extensions='vue')
+  - 需求提到"研究状态" → search_file(keyword='研究状态,followStatus', root_path=项目路径, file_extensions='vue')
+- **多关键词搜索**：keyword 支持逗号分隔（OR逻辑），中文业务名 + 英文字段名一起搜命中率最高
+- **file_extensions 过滤**：搜索表单页面时用 file_extensions='vue'，搜索接口时用 'js,ts'
+- **search_file 返回匹配行号和上下文**：根据返回的代码片段判断是否为目标文件，再用 read_file 读取完整内容
 
 ## 要求
 1. 如果需要调用工具，将任务分解为多个步骤，每个步骤明确调用什么工具
-2. 如果不需要调用工具，直接回答即可，输出空数组 []
-3. 输出格式必须是 JSON 数组，包含步骤描述和工具名称：
+2. 每个步骤的 "tool" 必须是上方列表中的工具名，"args" 中的参数名必须与列表中一致
+3. 如果不需要调用工具，直接回答即可，输出空数组 []
+4. 输出格式必须是 JSON 数组，包含步骤描述和工具名称：
    [
      {{
        "step": "步骤描述",
-       "tool": "工具名称（如 read_file, write_file, list_dir）",
-       "args": {{参数键值}}
+       "tool": "工具名称",
+       "args": {{"参数名": "参数值"}}
      }}
    ]"""
 
@@ -134,11 +182,16 @@ def _build_reviewer_prompt(query: str, trace: list, step_count: int, max_steps: 
 2. 检查是否有失败的步骤（status=error），这些步骤是否影响最终结果
 3. 判断是否需要补充执行额外步骤（如：读取更多文件、搜索更多目录、修复错误后重试）
 
-## 判定规则
-- **is_complete = true**: 所有步骤成功执行，用户问题已得到回答
-- **is_complete = false**: 有关键步骤失败，或需要补充执行额外步骤才能回答用户问题
+## 判定规则（重要！避免无效循环）
+- **is_complete = true 的条件**（满足任一即可）:
+  a) 所有步骤成功执行，用户问题已得到回答
+  b) 大部分步骤成功，已获取足够信息回答用户问题（个别失败步骤不影响整体结论）
+  c) 失败的步骤是因为工具不存在或参数错误，重试也不会成功
+- **is_complete = false** 仅当: 有关键步骤失败且重试可能成功，或缺少必要信息无法回答用户问题
   - 此时必须提供 revised_plan，包含**仅新增的**步骤（不要重复已成功的步骤）
   - revised_plan 中每个步骤格式与原始 plan 相同：{{"step": "描述", "tool": "工具名", "args": {{...}}}}
+  - **不要重复已失败的步骤**（除非有充分理由认为重试会成功）
+- **当剩余轮次 ≤ 2 时，倾向于 is_complete = true**，用已有信息总结回答
 
 ## 输出格式（严格 JSON）
 {{
@@ -207,6 +260,18 @@ async def executor_node(state: AgentState) -> AgentState:
                 trace.append({
                     "step": step["step"],
                     "tool": e.tool_name or step["tool"],
+                    "args": step.get("args", {}),
+                    "result": error_msg,
+                    "status": "error"
+                })
+            except KeyError as e:
+                # handler 内部 args["key"] 取值失败 — 参数名不匹配
+                logger.warning("工具 %s 参数缺失: %s (args=%s)", step["tool"], e, step.get("args", {}))
+                error_msg = f"参数缺失: {e}。请检查工具参数名是否正确，args={step.get('args', {})}"
+                results.append({"step": step["step"], "tool": step["tool"], "result": error_msg})
+                trace.append({
+                    "step": step["step"],
+                    "tool": step["tool"],
                     "args": step.get("args", {}),
                     "result": error_msg,
                     "status": "error"
@@ -389,11 +454,20 @@ def _extract_preferences(query: str, plan: list, trace: list) -> dict:
     return preferences
 
 
-async def run_graph_stream(query: str, conv_id: Optional[str] = None, images: Optional[list[dict]] = None):
-    logger.info("run_graph_stream: 开始处理 query=%s, conv_id=%s, images=%d",
+async def run_graph_stream(query: str, conv_id: Optional[str] = None, images: Optional[list[dict]] = None,
+                          has_uploaded_files: bool = False):
+    """运行 Agent 图流水线。
+
+    Args:
+        query: 用户问题（可能包含历史对话上下文）
+        conv_id: 会话 ID
+        images: 当前消息上传的图片列表
+        has_uploaded_files: 当前消息是否包含上传文件（由调用方显式传入，
+            不能从 query 文本推断——因为历史对话中也可能包含【文件:标记）
+    """
+    logger.info("run_graph_stream: 开始处理 query=%s, conv_id=%s, images=%d, has_uploaded_files=%s",
                 query[:50] + "..." if len(query) > 50 else query, conv_id,
-                len(images) if images else 0)
-    has_uploaded_files = "【文件:" in query or "以下是上传的文件内容" in query or "【图片:" in query
+                len(images) if images else 0, has_uploaded_files)
     has_images = bool(images)
 
     # 预计算共享上下文（文件上传、规划、no-plan fallback、summary 均复用，避免重复调用 build_context 等）
@@ -508,9 +582,19 @@ async def run_graph_stream(query: str, conv_id: Optional[str] = None, images: Op
             plan = json.loads(content)
         else:
             parsed = json.loads(content)
-            plan = parsed.get("steps", []) if isinstance(parsed, dict) else []
+            if isinstance(parsed, dict):
+                # 模型可能用不同的 key 包裹步骤数组，按优先级搜索
+                for key in ("steps", "plan", "tasks", "result", "actions"):
+                    if key in parsed and isinstance(parsed[key], list):
+                        plan = parsed[key]
+                        break
+                else:
+                    # 兜底：找第一个 list 类型的值
+                    plan = next((v for v in parsed.values() if isinstance(v, list)), [])
+            else:
+                plan = []
     except json.JSONDecodeError as e:
-        logger.warning("plan JSON 解析失败: %s", e)
+        logger.warning("plan JSON 解析失败: %s, 原始内容: %s", e, full_content[:200])
         plan = []
 
     if not plan:

@@ -113,8 +113,8 @@ tool_definitions = [
 
 # 工具执行映射
 tool_handlers = {
-    "save_memory": lambda args: save_memory(args["name"], args["content"]),
-    "read_memory": lambda args: read_memory(args["name"]),
+    "save_memory": lambda args: save_memory(args.get("name", ""), args.get("content", "")),
+    "read_memory": lambda args: read_memory(args.get("name", "")),
     "list_memory": lambda args: list_memory(),
-    "delete_memory": lambda args: delete_memory(args["name"]),
+    "delete_memory": lambda args: delete_memory(args.get("name", "")),
 }

@@ -158,10 +158,10 @@ tool_definitions = [
 
 # 工具执行映射
 tool_handlers = {
-    "save_skill": lambda args: save_skill(args["name"], args["content"]),
-    "read_skill": lambda args: read_skill(args["name"]),
+    "save_skill": lambda args: save_skill(args.get("name", ""), args.get("content", "")),
+    "read_skill": lambda args: read_skill(args.get("name", "")),
     "list_skills": lambda args: list_skills(),
-    "save_task": lambda args: save_task(args["name"], args["content"]),
-    "read_task": lambda args: read_task(args["name"]),
+    "save_task": lambda args: save_task(args.get("name", ""), args.get("content", "")),
+    "read_task": lambda args: read_task(args.get("name", "")),
     "list_tasks": lambda args: list_tasks(),
 }

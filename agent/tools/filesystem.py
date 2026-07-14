@@ -144,59 +144,29 @@ def _list_flat(dir_path: Path) -> str:
 
 
 def _scan_directory_recursive(root: Path, max_depth: int) -> dict:
-    """递归扫描目录，返回结构化结果"""
+    """递归扫描目录，返回嵌套结构化结果"""
     result = {
         "path": str(root),
         "name": root.name,
         "type": "directory",
-        "items": [],
+        "items": _collect_nested(root, 0, max_depth),
     }
-
-    def collect(path: Path, current_depth: int):
-        if current_depth > max_depth:
-            return
-        try:
-            items = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-        except PermissionError:
-            return
-
-        for item in items:
-            if _is_ignored(item):
-                continue
-
-            info = {
-                "name": item.name,
-                "type": "directory" if item.is_dir() else "file",
-                "path": str(item),
-            }
-
-            if item.is_file():
-                info["extension"] = item.suffix.lower()
-                try:
-                    info["size"] = item.stat().st_size
-                except OSError:
-                    info["size"] = 0
-
-            if item.is_dir() and current_depth < max_depth:
-                sub_items = []
-                _collect_recursive(item, current_depth + 1, sub_items, max_depth)
-                info["children"] = sub_items
-
-            result["items"].append(info)
-
-    collect(root, 0)
     return result
 
 
-def _collect_recursive(path: Path, depth: int, accumulator: list, max_depth: int):
-    """递归收集子目录内容"""
-    if depth > max_depth:
-        return
+def _collect_nested(path: Path, depth: int, max_depth: int) -> list:
+    """递归收集目录内容，返回嵌套列表
+
+    每个目录的 children 是其直接子项的列表，子目录再嵌套。
+    """
+    if depth >= max_depth:
+        return []
     try:
         items = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
     except PermissionError:
-        return
+        return []
 
+    result = []
     for item in items:
         if _is_ignored(item):
             continue
@@ -211,59 +181,106 @@ def _collect_recursive(path: Path, depth: int, accumulator: list, max_depth: int
                 info["size"] = item.stat().st_size
             except OSError:
                 info["size"] = 0
-        accumulator.append(info)
-        if item.is_dir() and depth < max_depth:
-            _collect_recursive(item, depth + 1, accumulator, max_depth)
+        if item.is_dir():
+            info["children"] = _collect_nested(item, depth + 1, max_depth)
+        result.append(info)
+    return result
 
 
-def search_file(query: str = "", keyword: str = "", root_path: str = "", max_results: int = 20) -> str:
-    """搜索文件内容
+def search_file(query: str = "", keyword: str = "", root_path: str = "",
+                max_results: int = 20, file_extensions: str = "", context_lines: int = 3) -> str:
+    """搜索文件内容，返回匹配行及上下文
 
     两种模式:
     1. workspace 模式: 只传 query, 在 workspace 内搜索
     2. 项目模式: 传 keyword + root_path, 在指定项目目录内搜索 (推荐用于扫描用户项目)
 
+    项目模式增强:
+    - 返回匹配行号和上下文，便于直接定位代码
+    - 支持 file_extensions 过滤（如 "vue,js,ts"）
+    - 支持逗号分隔的多关键词（OR 逻辑，任一匹配即返回）
+    - 自动排除 .md/.json 等生成文档，优先搜索源码文件
+
     Raises:
         ToolError: 缺少必要参数 / 路径不存在 / 不是目录
     """
     if keyword and root_path:
-        # 项目模式
+        # 项目模式 — 增强版，返回匹配行+上下文
         root = Path(root_path).resolve()
         if not root.exists():
             raise ToolError(f"路径不存在: {root_path}", "search_file")
         if not root.is_dir():
             raise ToolError(f"不是目录: {root_path}", "search_file")
 
-        results = []
-        keyword_lower = keyword.lower()
+        # 解析关键词列表（逗号分隔 → OR 逻辑）
+        keywords = [k.strip().lower() for k in keyword.split(",") if k.strip()]
+        if not keywords:
+            raise ToolError("keyword 不能为空", "search_file")
 
+        # 解析文件扩展名过滤
+        ext_filter = None
+        if file_extensions:
+            ext_filter = set()
+            for ext in file_extensions.split(","):
+                ext = ext.strip().lstrip(".")
+                if ext:
+                    ext_filter.add(f".{ext.lower()}")
+        else:
+            # 默认只搜索源码文件，排除 .md/.json/.txt 等非源码
+            ext_filter = SCAN_ALLOWED_EXTENSIONS - {".md", ".json", ".txt", ".yaml", ".yml"}
+
+        results = []
         for file_path in root.rglob("*"):
             if _is_ignored(file_path):
                 continue
             if not file_path.is_file():
                 continue
-            if file_path.suffix.lower() not in SCAN_ALLOWED_EXTENSIONS:
+            if ext_filter and file_path.suffix.lower() not in ext_filter:
                 continue
 
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
-                if keyword_lower in content.lower():
-                    results.append({
-                        "file": str(file_path),
-                        "relative_path": str(file_path.relative_to(root)),
-                        "name": file_path.name,
-                    })
-                    if len(results) >= max_results:
-                        break
             except (PermissionError, OSError):
                 continue
 
+            lines = content.splitlines()
+            matches = []
+            for i, line in enumerate(lines):
+                line_lower = line.lower()
+                for kw in keywords:
+                    if kw in line_lower:
+                        # 收集上下文
+                        start = max(0, i - context_lines)
+                        end = min(len(lines), i + context_lines + 1)
+                        context = []
+                        for j in range(start, end):
+                            prefix = ">>>" if j == i else "   "
+                            context.append(f"{prefix} L{j+1}: {lines[j]}")
+                        matches.append({
+                            "line": i + 1,
+                            "keyword": kw,
+                            "context": "\n".join(context),
+                        })
+                        break  # 同一行不重复匹配
+
+            if matches:
+                results.append({
+                    "file": str(file_path),
+                    "relative_path": str(file_path.relative_to(root)).replace("\\", "/"),
+                    "name": file_path.name,
+                    "match_count": len(matches),
+                    "matches": matches[:10],  # 每个文件最多返回 10 处匹配
+                })
+                if len(results) >= max_results:
+                    break
+
         if not results:
-            return f"在 {root_path} 中未找到包含 '{keyword}' 的文件"
+            kw_display = " | ".join(keywords)
+            return f"在 {root_path} 中未找到包含 '{kw_display}' 的源码文件"
         return json.dumps(results, ensure_ascii=False, indent=2)
 
     elif query:
-        # workspace 模式
+        # workspace 模式 — 简单搜索
         results = []
         for root_dir, dirs, files in os.walk(WORKSPACE):
             dirs[:] = [d for d in dirs if d not in SCAN_IGNORE_DIRS]
@@ -485,7 +502,7 @@ tool_definitions = [
                     },
                     "max_depth": {
                         "type": "integer",
-                        "description": "递归的最大深度，默认 5，建议设置为 5-10 以确保扫描到深层目录结构",
+                        "description": "递归的最大深度，默认 5。建议 1-3 层即可，过深会导致结果过大",
                         "default": 5
                     }
                 },
@@ -497,7 +514,7 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "search_file",
-            "description": "搜索文件内容。两种模式：1) 传 query 在 workspace 内搜索（简单模式）；2) 传 keyword + root_path 在指定项目目录内搜索（项目模式，推荐用于扫描用户项目）",
+            "description": "搜索项目源码内容，返回匹配行号和上下文代码（推荐用于定位业务页面）。项目模式：传 keyword + root_path 搜索指定项目目录。支持逗号分隔的多关键词（OR逻辑），可用 file_extensions 过滤文件类型。这是定位需修改代码最精准的方式——直接用需求文档中的字段名或业务术语作为 keyword 搜索源码",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -507,15 +524,25 @@ tool_definitions = [
                     },
                     "keyword": {
                         "type": "string",
-                        "description": "项目内搜索的关键词（项目模式，需配合 root_path），如 'dashboard' 或 'followup_status'"
+                        "description": "项目内搜索的关键词（项目模式，需配合 root_path）。支持逗号分隔多关键词（OR逻辑），如 '研究状态,followStatus' 或 '病灶编号,US-1'。建议用需求文档中的字段名、业务术语、组件名作为关键词"
                     },
                     "root_path": {
                         "type": "string",
-                        "description": "搜索的根目录绝对路径（项目模式，如 'D:/projects/xxx'）"
+                        "description": "搜索的根目录绝对路径（项目模式，如 '/Users/xxx/projects/my-project'）"
+                    },
+                    "file_extensions": {
+                        "type": "string",
+                        "description": "过滤文件扩展名（逗号分隔），如 'vue,js,ts'。不传则默认搜索所有源码文件",
+                        "default": ""
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "每个匹配行上下显示的上下文行数，默认 3",
+                        "default": 3
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "最大返回结果数，默认 20",
+                        "description": "最大返回文件数，默认 20",
                         "default": 20
                     }
                 },
@@ -603,21 +630,38 @@ tool_definitions = [
 # ─── 工具执行映射 ───
 
 tool_handlers = {
-    "read_file": lambda args: read_file(args["path"], max_size=args.get("max_size", 1048576)),
+    "read_file": lambda args: read_file(
+        args.get("path", "") or args.get("file_path", "") or args.get("filename", ""),
+        max_size=args.get("max_size", 1048576)
+    ),
     "list_dir": lambda args: list_dir(
-        path=args.get("path", ""),
+        path=args.get("path", "") or args.get("dir_path", "") or args.get("directory", ""),
         recursive=args.get("recursive", False),
         max_depth=args.get("max_depth", 5)
     ),
     "search_file": lambda args: search_file(
         query=args.get("query", ""),
-        keyword=args.get("keyword", ""),
-        root_path=args.get("root_path", ""),
-        max_results=args.get("max_results", 20)
+        keyword=args.get("keyword", "") or args.get("keywords", ""),
+        root_path=args.get("root_path", "") or args.get("path", "") or args.get("project_path", ""),
+        max_results=args.get("max_results", 20),
+        file_extensions=args.get("file_extensions", "") or args.get("extensions", ""),
+        context_lines=args.get("context_lines", 3)
     ),
-    "scan_menu_structure": lambda args: scan_menu_structure(args["project_path"]),
-    "write_file": lambda args: write_file(args["path"], args["content"]),
-    "delete_file": lambda args: delete_file(args["path"]),
-    "append_file": lambda args: append_file(args["path"], args["content"]),
-    "create_folder": lambda args: create_folder(args["path"]),
+    "scan_menu_structure": lambda args: scan_menu_structure(
+        args.get("project_path", "") or args.get("path", "") or args.get("root_path", "")
+    ),
+    "write_file": lambda args: write_file(
+        args.get("path", "") or args.get("file_path", ""),
+        args.get("content", "")
+    ),
+    "delete_file": lambda args: delete_file(
+        args.get("path", "") or args.get("file_path", "")
+    ),
+    "append_file": lambda args: append_file(
+        args.get("path", "") or args.get("file_path", ""),
+        args.get("content", "")
+    ),
+    "create_folder": lambda args: create_folder(
+        args.get("path", "") or args.get("folder_path", "")
+    ),
 }
