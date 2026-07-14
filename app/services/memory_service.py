@@ -1,31 +1,50 @@
+"""记忆服务 — API 层
+
+重复的 CRUD 操作委托给 agent/tools/memory.py，
+保留 user_profile 等独有功能。
+"""
+
 from pathlib import Path
 from app.config import WORKSPACE
+from agent.exceptions import ResourceNotFoundError
 
 
 def list_memory():
-    mem_dir = WORKSPACE / "memory"
-    if not mem_dir.exists():
+    """列出所有记忆 — 委托给 agent/tools/memory.py"""
+    from agent.tools.memory import list_memory as _list
+    result = _list()
+    # agent 版返回字符串，API 层需要 dict 列表
+    if result.startswith("暂无"):
         return []
-    files = sorted(mem_dir.glob("*.md"))
-    return [{"name": f.stem, "file": f.name} for f in files]
+    items = []
+    for line in result.strip().split("\n"):
+        name = line.replace("📄 ", "").strip()
+        if name:
+            items.append({"name": name, "file": f"{name}.md"})
+    return items
 
 
 def get_memory(name: str):
-    file_path = WORKSPACE / "memory" / f"{name}.md"
-    if not file_path.exists():
+    """读取记忆 — 委托给 agent/tools/memory.py"""
+    from agent.tools.memory import read_memory
+    try:
+        content = read_memory(name)
+        return {"name": name, "content": content}
+    except ResourceNotFoundError:
         return None
-    return {"name": name, "content": file_path.read_text(encoding="utf-8")}
 
 
 def save_memory(name: str, content: str):
-    mem_dir = WORKSPACE / "memory"
-    mem_dir.mkdir(parents=True, exist_ok=True)
-    file_path = mem_dir / f"{name}.md"
-    file_path.write_text(content, encoding="utf-8")
-    return {"status": "saved", "file": file_path.name}
+    """保存记忆 — 委托给 agent/tools/memory.py"""
+    from agent.tools.memory import save_memory as _save
+    _save(name, content)
+    return {"status": "saved", "file": f"{name}.md"}
 
+
+# ─── 以下为独有功能，不委托 ───
 
 def get_user_profile():
+    """获取用户画像 — graph_service 内部调用，不作为 LLM 工具"""
     profile_path = WORKSPACE / "memory" / "user_profile.md"
     if not profile_path.exists():
         return {"name": "user_profile", "content": "# 用户画像\n\n## 技术栈偏好\n\n## 常用技能\n\n## 代码风格\n\n## 其他偏好\n"}
@@ -33,6 +52,7 @@ def get_user_profile():
 
 
 def update_profile(preferences: dict):
+    """更新用户画像 — graph_service 内部调用，不作为 LLM 工具"""
     profile_path = WORKSPACE / "memory" / "user_profile.md"
     mem_dir = WORKSPACE / "memory"
     mem_dir.mkdir(parents=True, exist_ok=True)

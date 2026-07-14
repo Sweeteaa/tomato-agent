@@ -12,6 +12,10 @@ from app.routes.file_router import router as file_router
 from app.routes.chat_router import router as chat_router
 from app.routes.artifact_router import router as artifact_router
 from app.config import WORKSPACE
+from app.logging_config import setup_logging
+
+# 初始化日志系统
+setup_logging()
 
 app = FastAPI(title="GT Agent", version="1.0.0")
 

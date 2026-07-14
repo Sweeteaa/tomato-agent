@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from app.config import ALLOWED_PROJECT_ROOTS, PROJECTS_ROOT, WORKSPACE
+from app.config import ALLOWED_PROJECT_ROOTS, PROJECTS_ROOT, SCAN_IGNORE_DIRS, WORKSPACE
 from app.models.project_registry import ProjectRegistryCreate, ProjectRegistryItem, ProjectRegistryUpdate
 
 
@@ -150,24 +150,6 @@ def _guess_dev_command(package_data: dict, package_manager: str) -> str:
             return "yarn start"
         return "npm start"
     return ""
-
-
-SCAN_IGNORE_DIRS = {
-    ".git",
-    ".idea",
-    "node_modules",
-    "__pycache__",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    ".DS_Store",
-    ".Trash",
-    ".fseventsd",
-    ".Spotlight-V100",
-    ".apdisk",
-    ".AppleDouble",
-}
 
 
 def _is_ignored(path: Path) -> bool:

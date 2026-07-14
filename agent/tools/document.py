@@ -1,7 +1,11 @@
-"""文档工具层 — 负责技能文档和任务的读写操作"""
+"""文档工具层 — 负责技能文档和任务的读写操作
+
+错误处理: 抛出 ResourceNotFoundError 异常而非返回 ❌ 字符串
+"""
 
 from pathlib import Path
 from app.config import WORKSPACE
+from agent.exceptions import ResourceNotFoundError
 
 
 def save_skill(name: str, content: str) -> str:
@@ -13,10 +17,14 @@ def save_skill(name: str, content: str) -> str:
 
 
 def read_skill(name: str) -> str:
-    """读取技能文档"""
+    """读取技能文档
+
+    Raises:
+        ResourceNotFoundError: 技能不存在
+    """
     file_path = WORKSPACE / "skill" / f"{name}.md"
     if not file_path.exists():
-        return f"❌ 技能不存在: {name}"
+        raise ResourceNotFoundError("技能", name, "document")
     return file_path.read_text(encoding="utf-8")
 
 
@@ -40,10 +48,14 @@ def save_task(name: str, content: str) -> str:
 
 
 def read_task(name: str) -> str:
-    """读取任务清单"""
+    """读取任务清单
+
+    Raises:
+        ResourceNotFoundError: 任务不存在
+    """
     file_path = WORKSPACE / "tasks" / f"{name}.md"
     if not file_path.exists():
-        return f"❌ 任务不存在: {name}"
+        raise ResourceNotFoundError("任务", name, "document")
     return file_path.read_text(encoding="utf-8")
 
 

@@ -1,18 +1,17 @@
 import json
-import asyncio
+import logging
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from app.services.chat_service import chat_with_agent_stream
+
+logger = logging.getLogger("gt_agent.chat_router")
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
 
 async def _stream_events(query: str, conv_id: str, file_contents: list):
-    loop = asyncio.get_event_loop()
-    
-    for event in chat_with_agent_stream(query, conv_id, file_contents):
+    async for event in chat_with_agent_stream(query, conv_id, file_contents):
         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        await asyncio.sleep(0.01)
 
 
 @router.post("/chat")
@@ -22,6 +21,7 @@ async def chat_endpoint(
     files: list[UploadFile] = File(None)
 ):
     if not message and not files:
+        logger.warning("聊天请求缺少 message 和 files")
         raise HTTPException(status_code=400, detail="Message or file is required")
     
     file_contents = []
@@ -40,4 +40,5 @@ async def chat_endpoint(
             }
         )
     except Exception as e:
+        logger.error("聊天流式响应异常: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"LLM Error: {str(e)}")

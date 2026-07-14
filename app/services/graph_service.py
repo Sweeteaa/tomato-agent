@@ -1,17 +1,22 @@
-from typing import TypedDict, Literal
+from typing import TypedDict, Literal, Optional
+import asyncio
+import json
+import logging
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from openai import OpenAI
-import json
+from openai import AsyncOpenAI
 
-from app.config import DASHSCOPE_API_KEY, WORKSPACE_ID, MODEL_NAME, TEMPERATURE
+from app.config import DASHSCOPE_API_KEY, WORKSPACE_ID, MODEL_NAME, VL_MODEL_NAME, TEMPERATURE_PLANNING, TEMPERATURE_CHAT, MAX_STEPS
 from app.services.file_service import build_context
 from app.services.memory_service import get_user_profile, update_profile
 from app.services.task_service import get_pending_tasks, save_pending_task
 from agent.registry.capability_registry import create_default_registry
 from agent.skill_manager.manager import SkillManager
+from agent.exceptions import ToolError
 
-client = OpenAI(
+logger = logging.getLogger("gt_agent.graph")
+
+client = AsyncOpenAI(
     api_key=DASHSCOPE_API_KEY,
     base_url=f"https://{WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
 )
@@ -19,39 +24,47 @@ client = OpenAI(
 registry = create_default_registry()
 skill_manager = SkillManager()
 
-MAX_STEPS = 5
+# ─── 防幻觉规则（统一常量，避免重复） ───
+ANTI_HALLUCINATION_RULES = """## 防幻觉规则（强制遵守）
+1. 禁止猜测项目结构、目录内容、文件名
+2. 禁止根据需求文档推断文件路径或内容
+3. 禁止创建不存在的文件路径
+4. 禁止根据目录名称推断业务功能（如不能因目录名包含"data"就推断它是"实验室检查"页面）
+5. 当用户要求扫描项目、查看目录结构、分析代码时，必须调用 list_dir / read_file / search_file 工具获取真实结果
+6. 扫描项目结构时，**必须先调用 list_dir 工具**获取目录结构信息，建议使用足够的深度（max_depth=5-10）
+7. 如果工具没有返回结果，只能回答"无法访问本地文件系统，请检查路径是否正确或提供扫描权限"""
 
 
 class AgentState(TypedDict):
-    messages: list
-    plan: list
-    execution_results: list
-    execution_trace: list
-    original_plan_length: int
+    messages: list[str]
+    plan: list[dict]
+    execution_results: list[dict]
+    execution_trace: list[dict]
     review_feedback: str
     is_complete: bool
-    conv_id: str
+    revised_plan: list[dict]
+    conv_id: Optional[str]
     step_count: int
 
 
-def _build_planner_prompt(query: str) -> str:
-    context = build_context(query)
-    skill_context = skill_manager.get_skill_context(query)
-    capabilities = registry.list_capabilities()
-    user_profile = get_user_profile()["content"]
-    pending_tasks = get_pending_tasks()
-
-    cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
-
-    pending_info = ""
-    if pending_tasks["count"] > 0:
-        pending_info = f"\n## 待办任务提醒\n你有 {pending_tasks['count']} 个未完成任务，请优先处理或询问用户是否继续。\n"
-        for task in pending_tasks["tasks"][:3]:
-            pending_info += f"- 对话 {task['id']} ({task['created_at']}): {len(task['steps'])} 个待办步骤\n"
-
-    has_files = "文件:" in query or "【文件" in query
-
-    needs_scan = any(keyword in query for keyword in ["扫描项目", "项目结构", "目录结构", "文件列表", "查看目录", "查找文件", "分析代码", "页面文件"])
+def _build_planner_prompt(query: str, context: str = None, skill_context: str = None, cap_desc: str = None,
+                          user_profile: str = None, pending_info: str = None) -> str:
+    if context is None:
+        context = build_context(query)
+    if skill_context is None:
+        skill_context = skill_manager.get_skill_context(query)
+    if cap_desc is None:
+        capabilities = registry.list_capabilities()
+        cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
+    if user_profile is None:
+        user_profile = get_user_profile()["content"]
+    if pending_info is None:
+        pending_tasks = get_pending_tasks()
+        pending_info = ""
+        if pending_tasks["count"] > 0:
+            pending_info = f"\n## 待办任务提醒\n你有 {pending_tasks['count']} 个未完成任务，请优先处理或询问用户是否继续。\n"
+            for task in pending_tasks["tasks"][:3]:
+                pending_info += f"- 对话 {task['id']} ({task['created_at']}): {len(task['steps'])} 个待办步骤\n"
 
     prompt = f"""你是 GT Agent 的规划师。根据用户问题，制定详细的执行计划。
 
@@ -71,26 +84,18 @@ def _build_planner_prompt(query: str) -> str:
 ## 知识库上下文
 {context if context else "无"}
 
-## 防幻觉规则（强制遵守）
-1. 禁止猜测项目结构、目录内容、文件名
-2. 禁止根据需求文档推断文件路径或内容
-3. 禁止创建不存在的文件路径
-4. 禁止根据目录名称推断业务功能（如不能因目录名包含"data"就推断它是"实验室检查"页面）
-5. 当用户要求扫描项目、查看目录结构、分析代码时，必须调用 list_dir / read_file / search_file 工具获取真实结果
-6. 扫描项目结构时，**必须先调用 list_dir 工具**获取目录结构信息，建议使用足够的深度（max_depth=5-10）
-7. list_dir 必须使用足够的深度（建议 max_depth=5-10），确保扫描到深层目录结构
-8. 如果工具没有返回结果，只能回答"无法访问本地文件系统，请检查路径是否正确或提供扫描权限"
-9. list_dir 的 path 参数必须是真实存在的绝对路径，如 'D:/projects/xxx'
+{ANTI_HALLUCINATION_RULES}
 
-## 重要提示
-{"用户已上传文件，文件内容已包含在用户问题中，请直接根据文件内容回答，不需要再调用 read_file 工具读取文件。" if has_files else ""}
-{"用户要求扫描项目或查看文件，必须调用 list_dir 或 read_file 工具获取真实文件系统结果，禁止编造目录结构或文件内容。" if needs_scan else ""}
+## 路径规则（重要！）
+- **扫描用户项目**: 使用绝对路径，如 list_dir(path='D:/projects/xxx'), read_file(path='D:/projects/xxx/src/App.vue'), scan_menu_structure(project_path='D:/projects/xxx')
+- **workspace 内操作**: 使用相对路径（不需要加 workspace 前缀），如 write_file(path='skill/hello.md'), save_skill(name='xxx', content='...')
+- read_file 和 list_dir 同时支持绝对路径和相对路径
+- write_file / delete_file / append_file / create_folder 只支持 workspace 相对路径
 
 ## 要求
 1. 如果需要调用工具，将任务分解为多个步骤，每个步骤明确调用什么工具
 2. 如果不需要调用工具，直接回答即可，输出空数组 []
-3. 路径参数是相对于 workspace 的相对路径，不需要加 workspace 前缀
-4. 输出格式必须是 JSON 数组，包含步骤描述和工具名称：
+3. 输出格式必须是 JSON 数组，包含步骤描述和工具名称：
    [
      {{
        "step": "步骤描述",
@@ -102,171 +107,82 @@ def _build_planner_prompt(query: str) -> str:
     return prompt
 
 
-def _build_reviewer_prompt(plan: list, results: list, query: str) -> str:
+def _build_reviewer_prompt(query: str, trace: list, step_count: int, max_steps: int) -> str:
+    # 截断单个工具结果到 500 字符（保留关键信息，避免 reviewer 丢失上下文）
+    def _summarize_result(result, max_len=500):
+        text = str(result)
+        if len(text) <= max_len:
+            return text
+        return text[:max_len] + "...[已截断，完整结果见 execution_trace]"
+
+    trace_summary = "\n".join(
+        f"  {i+1}. [{t.get('status', 'unknown')}] {t.get('step', '')} (工具: {t.get('tool', 'N/A')}) → {_summarize_result(t.get('result', ''))}"
+        for i, t in enumerate(trace)
+    ) if trace else "  （无执行记录）"
+
+    remaining_steps = max_steps - step_count
+
     return f"""评审执行结果：
 
 用户问题: {query}
 
-执行计划:
-{json.dumps(plan, ensure_ascii=False)}
+## 完整执行轨迹（第 {step_count} 轮，剩余 {remaining_steps} 轮）
+{trace_summary}
 
-执行结果:
-{json.dumps(results, ensure_ascii=False)}
+## 评审要求
+1. 仔细检查每个步骤的执行结果，判断用户问题是否已被充分解决
+2. 检查是否有失败的步骤（status=error），这些步骤是否影响最终结果
+3. 判断是否需要补充执行额外步骤（如：读取更多文件、搜索更多目录、修复错误后重试）
 
-## 要求
-1. 判断任务是否已完成
-2. 如果已完成，总结执行结果给用户
-3. 如果未完成但已尽力，也要总结当前结果
+## 判定规则
+- **is_complete = true**: 所有步骤成功执行，用户问题已得到回答
+- **is_complete = false**: 有关键步骤失败，或需要补充执行额外步骤才能回答用户问题
+  - 此时必须提供 revised_plan，包含**仅新增的**步骤（不要重复已成功的步骤）
+  - revised_plan 中每个步骤格式与原始 plan 相同：{{"step": "描述", "tool": "工具名", "args": {{...}}}}
 
-输出格式必须是 JSON：
+## 输出格式（严格 JSON）
 {{
   "is_complete": true,
-  "feedback": "总结结果给用户"
+  "feedback": "用自然语言总结执行结果，回答用户问题",
+  "revised_plan": []
+}}
+
+或当未完成时：
+{{
+  "is_complete": false,
+  "feedback": "简要说明当前进展和未完成原因",
+  "revised_plan": [
+    {{
+      "step": "补充步骤描述",
+      "tool": "工具名称",
+      "args": {{}}
+    }}
+  ]
 }}"""
 
 
-def planner_node(state: AgentState) -> AgentState:
-    query = state["messages"][-1]["content"]
-    
-    has_uploaded_files = "【文件:" in query or "以下是上传的文件内容" in query
-    
-    if has_uploaded_files:
-        context = build_context(query)
-        skill_context = skill_manager.get_skill_context(query)
-        capabilities = registry.list_capabilities()
-        cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
+async def planner_node(state: AgentState) -> AgentState:
+    """规划节点 — 使用 run_graph_stream 已生成的 plan，避免重复 LLM 调用。
 
-        direct_prompt = f"""你是 GT Agent，一个本地智能开发助手。
+    plan 在 run_graph_stream() 中通过流式 LLM 调用预先生成，
+    此节点仅做 pass-through，将 plan 传递给 executor。
 
-## 防幻觉规则（强制遵守）
-1. 禁止猜测项目结构、目录内容、文件名
-2. 禁止根据需求文档推断文件路径或内容
-3. 禁止创建不存在的文件路径
-4. 禁止根据目录名称推断业务功能（如不能因目录名包含"data"就推断它是"实验室检查"页面）
-5. 如果需要查看文件内容或目录结构，必须通过工具获取，禁止编造
-6. 扫描项目结构时，必须先调用 list_dir 工具获取目录结构信息
-
-知识库上下文: {context}
-相关技能: {skill_context}
-可用能力: {cap_desc}
-
-用户已上传文件，文件内容已包含在问题中，请直接根据文件内容回答用户问题：
-{query}"""
-
-        direct_messages = [{"role": "system", "content": "你是一个专业的开发助手"}, {"role": "user", "content": direct_prompt}]
-        direct_completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=direct_messages,
-            temperature=TEMPERATURE,
-        )
-
-        return {
-            **state,
-            "plan": [],
-            "execution_results": [],
-            "execution_trace": [],
-            "original_plan_length": 0,
-            "review_feedback": direct_completion.choices[0].message.content,
-            "is_complete": True,
-            "step_count": 0
-        }
-
-    prompt = _build_planner_prompt(query)
-
-    messages = [{"role": "system", "content": "你是一个专业的任务规划师，只输出 JSON 格式"}, {"role": "user", "content": prompt}]
-
-    completion = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=TEMPERATURE,
-        response_format={"type": "json_object"}
-    )
-
-    try:
-        content = completion.choices[0].message.content.strip()
-        if content.startswith('[') and content.endswith(']'):
-            plan = json.loads(content)
-        else:
-            parsed = json.loads(content)
-            plan = parsed.get("steps", []) if isinstance(parsed, dict) else []
-    except json.JSONDecodeError:
-        plan = []
-
-    if not plan:
-        context = build_context(query)
-        skill_context = skill_manager.get_skill_context(query)
-        capabilities = registry.list_capabilities()
-        cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
-
-        direct_prompt = f"""你是 GT Agent，一个本地智能开发助手。
-知识库上下文: {context}
-相关技能: {skill_context}
-可用能力: {cap_desc}
-
-直接回答用户问题：{query}"""
-
-        direct_messages = [{"role": "system", "content": "你是一个专业的开发助手"}, {"role": "user", "content": direct_prompt}]
-        direct_completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=direct_messages,
-            temperature=TEMPERATURE,
-        )
-
-        return {
-            **state,
-            "plan": [],
-            "execution_results": [],
-            "execution_trace": [],
-            "original_plan_length": 0,
-            "review_feedback": direct_completion.choices[0].message.content,
-            "is_complete": True,
-            "step_count": 0
-        }
-
-    return {**state, "plan": plan, "execution_results": [], "execution_trace": [], "original_plan_length": len(plan), "review_feedback": "", "is_complete": False, "step_count": 0}
+    文件上传和 no-plan 场景已在 run_graph_stream() 中提前 return，
+    到达此节点时 plan 必然非空。
+    """
+    plan = state.get("plan", [])
+    return {
+        **state,
+        "plan": plan,
+        "execution_results": [],
+        "execution_trace": [],
+        "review_feedback": "",
+        "is_complete": False,
+        "step_count": 0
+    }
 
 
-def _generate_streaming_response(prompt: str, system_msg: str = "你是一个专业的开发助手"):
-    messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
-    
-    for chunk in client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=TEMPERATURE,
-        stream=True
-    ):
-        if chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
-
-
-def _parse_plan_from_stream(query: str) -> list:
-    prompt = _build_planner_prompt(query)
-    messages = [{"role": "system", "content": "你是一个专业的任务规划师，只输出 JSON 格式"}, {"role": "user", "content": prompt}]
-    
-    full_content = ""
-    for chunk in client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=TEMPERATURE,
-        response_format={"type": "json_object"},
-        stream=True
-    ):
-        if chunk.choices[0].delta.content:
-            full_content += chunk.choices[0].delta.content
-            yield {"type": "status", "message": "正在规划任务..."}
-    
-    try:
-        content = full_content.strip()
-        if content.startswith('[') and content.endswith(']'):
-            return json.loads(content)
-        else:
-            parsed = json.loads(content)
-            return parsed.get("steps", []) if isinstance(parsed, dict) else []
-    except json.JSONDecodeError:
-        return []
-
-
-def executor_node(state: AgentState) -> AgentState:
+async def executor_node(state: AgentState) -> AgentState:
     plan = state["plan"]
     results = []
     trace = state.get("execution_trace", [])
@@ -275,7 +191,7 @@ def executor_node(state: AgentState) -> AgentState:
         if "tool" in step and step["tool"]:
             try:
                 args = step.get("args", {})
-                result = registry.execute_tool(step["tool"], args)
+                result = await asyncio.to_thread(registry.execute_tool, step["tool"], args)
                 results.append({"step": step["step"], "tool": step["tool"], "result": result})
                 trace.append({
                     "step": step["step"],
@@ -284,8 +200,20 @@ def executor_node(state: AgentState) -> AgentState:
                     "result": result,
                     "status": "success"
                 })
+            except ToolError as e:
+                logger.warning("工具 %s 执行失败: %s", e.tool_name, e.detail)
+                error_msg = f"执行失败: {e.detail}"
+                results.append({"step": step["step"], "tool": step["tool"], "result": error_msg})
+                trace.append({
+                    "step": step["step"],
+                    "tool": e.tool_name or step["tool"],
+                    "args": step.get("args", {}),
+                    "result": error_msg,
+                    "status": "error"
+                })
             except Exception as e:
-                error_msg = f"❌ 执行失败: {str(e)}"
+                logger.error("工具 %s 未知异常: %s", step["tool"], e, exc_info=True)
+                error_msg = f"执行失败: {str(e)}"
                 results.append({"step": step["step"], "tool": step["tool"], "result": error_msg})
                 trace.append({
                     "step": step["step"],
@@ -298,36 +226,85 @@ def executor_node(state: AgentState) -> AgentState:
     return {**state, "execution_results": results, "execution_trace": trace, "step_count": state["step_count"] + 1}
 
 
-def reviewer_node(state: AgentState) -> AgentState:
-    plan = state["plan"]
-    results = state["execution_results"]
+async def reviewer_node(state: AgentState) -> AgentState:
+    """评审节点 — 评估执行结果，决定是否完成或需要补充执行。
+
+    流程：
+    1. 无执行结果 → 直接完成
+    2. 达到 MAX_STEPS → 强制完成（避免无限循环）
+    3. 调用 LLM 评审 → 根据返回的 is_complete 决定后续：
+       - complete=True → 结束，feedback 作为最终回答
+       - complete=False → 使用 revised_plan 回到 executor 执行补充步骤
+    """
+    trace = state.get("execution_trace", [])
+    results = state.get("execution_results", [])
     query = state["messages"][-1]["content"]
+    step_count = state.get("step_count", 0)
 
-    if not results:
-        return {**state, "is_complete": True}
+    # 无结果可评审 → 直接完成
+    if not results and not trace:
+        logger.debug("reviewer: 无执行结果，直接完成")
+        return {**state, "is_complete": True, "review_feedback": "没有需要执行的步骤。"}
 
-    prompt = _build_reviewer_prompt(plan, results, query)
+    # 达到最大步数 → 强制完成，防止无限循环
+    if step_count >= MAX_STEPS:
+        logger.warning("reviewer: 达到 MAX_STEPS=%d，强制完成", MAX_STEPS)
+        return {
+            **state,
+            "is_complete": True,
+            "review_feedback": "已达到最大执行轮次限制，以下是当前已完成的执行结果总结。",
+        }
 
-    messages = [{"role": "system", "content": "你是一个专业的评审员，只输出 JSON 格式"}, {"role": "user", "content": prompt}]
+    prompt = _build_reviewer_prompt(query, trace, step_count, MAX_STEPS)
 
-    completion = client.chat.completions.create(
+    messages = [
+        {"role": "system", "content": "你是一个专业的任务评审员，只输出 JSON 格式"},
+        {"role": "user", "content": prompt},
+    ]
+
+    completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        temperature=TEMPERATURE,
-        response_format={"type": "json_object"}
+        temperature=TEMPERATURE_PLANNING,
+        response_format={"type": "json_object"},
     )
 
     try:
         review = json.loads(completion.choices[0].message.content)
+        is_complete = review.get("is_complete", True)
         feedback = review.get("feedback", "")
-    except json.JSONDecodeError:
+        revised_plan = review.get("revised_plan", [])
+    except (json.JSONDecodeError, KeyError) as e:
+        # JSON 解析失败 → 默认完成
+        logger.warning("reviewer: JSON 解析失败 (%s)，默认完成", e)
+        is_complete = True
         feedback = completion.choices[0].message.content
+        revised_plan = []
 
-    return {
-        **state,
-        "is_complete": True,
-        "review_feedback": feedback
-    }
+    # 安全网：revised_plan 必须是非空列表才有效
+    if not is_complete and not revised_plan:
+        # LLM 说未完成但没给修订计划 → 视为完成
+        logger.warning("reviewer: LLM 说未完成但未提供修订计划，视为完成")
+        is_complete = True
+
+    if is_complete:
+        logger.info("reviewer: 任务完成 (step_count=%d)", step_count)
+        return {
+            **state,
+            "is_complete": True,
+            "review_feedback": feedback,
+        }
+    else:
+        # 未完成 → 设置修订计划，清空 execution_results，回到 executor
+        logger.info("reviewer: 任务未完成，修订计划 %d 步，回到 executor", len(revised_plan))
+        return {
+            **state,
+            "is_complete": False,
+            "plan": revised_plan,
+            "execution_results": [],  # 清空，让 executor 重新填充
+            # execution_trace 保留——跨轮累积
+            "review_feedback": feedback,
+        }
 
 
 def _should_continue(state: AgentState) -> Literal["executor", END]:
@@ -412,52 +389,90 @@ def _extract_preferences(query: str, plan: list, trace: list) -> dict:
     return preferences
 
 
-def run_graph_stream(query: str, conv_id: str = None):
-    has_uploaded_files = "【文件:" in query or "以下是上传的文件内容" in query
-    
+async def run_graph_stream(query: str, conv_id: Optional[str] = None, images: Optional[list[dict]] = None):
+    logger.info("run_graph_stream: 开始处理 query=%s, conv_id=%s, images=%d",
+                query[:50] + "..." if len(query) > 50 else query, conv_id,
+                len(images) if images else 0)
+    has_uploaded_files = "【文件:" in query or "以下是上传的文件内容" in query or "【图片:" in query
+    has_images = bool(images)
+
+    # 预计算共享上下文（文件上传、规划、no-plan fallback、summary 均复用，避免重复调用 build_context 等）
+    context = await asyncio.to_thread(build_context, query)
+    skill_context = await asyncio.to_thread(skill_manager.get_skill_context, query)
+    capabilities = await asyncio.to_thread(registry.list_capabilities)
+    cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
+    user_profile = (await asyncio.to_thread(get_user_profile))["content"]
+
+    # 预计算待办任务信息
+    pending_tasks = await asyncio.to_thread(get_pending_tasks)
+    pending_info = ""
+    if pending_tasks["count"] > 0:
+        pending_info = f"\n## 待办任务提醒\n你有 {pending_tasks['count']} 个未完成任务，请优先处理或询问用户是否继续。\n"
+        for task in pending_tasks["tasks"][:3]:
+            pending_info += f"- 对话 {task['id']} ({task['created_at']}): {len(task['steps'])} 个待办步骤\n"
+
     if has_uploaded_files:
-        yield {"type": "status", "message": "正在分析上传文件..."}
-        
-        context = build_context(query)
-        skill_context = skill_manager.get_skill_context(query)
-        capabilities = registry.list_capabilities()
-        cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
+        # 有图片时用视觉模型，纯文本文件用普通模型
+        use_vl = has_images
+        active_model = VL_MODEL_NAME if use_vl else MODEL_NAME
+        status_msg = "正在分析上传图片..." if use_vl else "正在分析上传文件..."
+        yield {"type": "status", "message": status_msg}
+
+        image_hint = ""
+        if has_images:
+            image_names = ", ".join(img["filename"] for img in images)
+            image_hint = f"\n\n## 上传图片\n用户上传了 {len(images)} 张图片: {image_names}\n图片已附带在消息中，你可以直接看到图片内容。请结合图片和文本内容回答用户问题。"
 
         direct_prompt = f"""你是 GT Agent，一个本地智能开发助手。
 
-## 防幻觉规则（强制遵守）
-1. 禁止猜测项目结构、目录内容、文件名
-2. 禁止根据需求文档推断文件路径或内容
-3. 禁止创建不存在的文件路径
-4. 禁止根据目录名称推断业务功能（如不能因目录名包含"data"就推断它是"实验室检查"页面）
-5. 如果需要查看文件内容或目录结构，必须通过工具获取，禁止编造
+{ANTI_HALLUCINATION_RULES}
 6. 扫描项目结构时，必须先调用 scan_menu_structure 工具获取菜单和路由信息
+
+## 路径规则
+- 扫描用户项目: 使用绝对路径，如 'D:/projects/xxx'
+- workspace 内操作: 使用相对路径，如 'skill/hello.md'
 
 知识库上下文: {context}
 相关技能: {skill_context}
 可用能力: {cap_desc}
+{image_hint}
 
 用户已上传文件，文件内容已包含在问题中，请直接根据文件内容回答用户问题：
 {query}"""
 
         yield {"type": "status", "message": "正在生成回答..."}
-        
-        messages = [{"role": "system", "content": "你是一个专业的开发助手"}, {"role": "user", "content": direct_prompt}]
+
+        # 构建消息：有图片时用多模态格式，无图片时用纯文本
+        if has_images:
+            user_content = [{"type": "text", "text": direct_prompt}]
+            for img in images:
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img['mime']};base64,{img['data']}"}
+                })
+            messages = [
+                {"role": "system", "content": "你是一个专业的开发助手，具备图片理解能力"},
+                {"role": "user", "content": user_content}
+            ]
+        else:
+            messages = [{"role": "system", "content": "你是一个专业的开发助手"}, {"role": "user", "content": direct_prompt}]
+
+        logger.info("使用模型 %s 处理上传文件 (images=%d)", active_model, len(images) if images else 0)
         full_response = ""
-        
-        for chunk in client.chat.completions.create(
-            model=MODEL_NAME,
+
+        async for chunk in await client.chat.completions.create(
+            model=active_model,
             messages=messages,
-            temperature=TEMPERATURE,
+            temperature=TEMPERATURE_CHAT,
             stream=True
         ):
             if chunk.choices[0].delta.content:
                 token = chunk.choices[0].delta.content
                 full_response += token
                 yield {"type": "token", "content": token}
-        
-        update_profile(_extract_preferences(query, [], []))
-        
+
+        await asyncio.to_thread(update_profile, _extract_preferences(query, [], []))
+
         yield {
             "type": "done",
             "response": full_response,
@@ -473,14 +488,14 @@ def run_graph_stream(query: str, conv_id: str = None):
 
     yield {"type": "status", "message": "正在规划任务..."}
     
-    prompt = _build_planner_prompt(query)
+    prompt = _build_planner_prompt(query, context, skill_context, cap_desc, user_profile, pending_info)
     messages = [{"role": "system", "content": "你是一个专业的任务规划师，只输出 JSON 格式"}, {"role": "user", "content": prompt}]
     
     full_content = ""
-    for chunk in client.chat.completions.create(
+    async for chunk in await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        temperature=TEMPERATURE,
+        temperature=TEMPERATURE_PLANNING,
         response_format={"type": "json_object"},
         stream=True
     ):
@@ -494,16 +509,12 @@ def run_graph_stream(query: str, conv_id: str = None):
         else:
             parsed = json.loads(content)
             plan = parsed.get("steps", []) if isinstance(parsed, dict) else []
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.warning("plan JSON 解析失败: %s", e)
         plan = []
 
     if not plan:
         yield {"type": "status", "message": "正在生成回答..."}
-        
-        context = build_context(query)
-        skill_context = skill_manager.get_skill_context(query)
-        capabilities = registry.list_capabilities()
-        cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in capabilities)
 
         direct_prompt = f"""你是 GT Agent，一个本地智能开发助手。
 知识库上下文: {context}
@@ -512,13 +523,15 @@ def run_graph_stream(query: str, conv_id: str = None):
 
 直接回答用户问题：{query}"""
 
+        logger.info("plan 为空，直接回答用户")
+
         messages = [{"role": "system", "content": "你是一个专业的开发助手"}, {"role": "user", "content": direct_prompt}]
         full_response = ""
         
-        for chunk in client.chat.completions.create(
+        async for chunk in await client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            temperature=TEMPERATURE,
+            temperature=TEMPERATURE_CHAT,
             stream=True
         ):
             if chunk.choices[0].delta.content:
@@ -526,7 +539,7 @@ def run_graph_stream(query: str, conv_id: str = None):
                 full_response += token
                 yield {"type": "token", "content": token}
         
-        update_profile(_extract_preferences(query, [], []))
+        await asyncio.to_thread(update_profile, _extract_preferences(query, [], []))
         
         yield {
             "type": "done",
@@ -542,19 +555,20 @@ def run_graph_stream(query: str, conv_id: str = None):
         return
 
     yield {"type": "plan", "steps": plan, "plan_steps": len(plan)}
+    logger.info("规划完成: %d 步", len(plan))
 
     config = {"configurable": {"thread_id": conv_id or "default"}}
     trace = []
-    step_count = 0
+    total_step_count = 0  # 跨所有轮次的步骤计数
     final_state = None
+    max_steps_reached = False
 
-    for event in graph.stream(
+    async for event in graph.astream(
         {
             "messages": [{"role": "user", "content": query}],
             "plan": plan,
             "execution_results": [],
             "execution_trace": [],
-            "original_plan_length": len(plan),
             "review_feedback": "",
             "is_complete": False,
             "conv_id": conv_id or "",
@@ -568,27 +582,41 @@ def run_graph_stream(query: str, conv_id: str = None):
                 if len(current_trace) > len(trace):
                     new_steps = current_trace[len(trace):]
                     for step in new_steps:
-                        step_count += 1
-                        yield {"type": "status", "message": f"正在执行步骤 {step_count}/{len(plan)}: {step['step']}"}
+                        total_step_count += 1
+                        yield {"type": "status", "message": f"正在执行步骤 {total_step_count}: {step['step']}"}
                         yield {"type": "trace", "step": step}
                     trace = current_trace
             elif node == "reviewer":
                 yield {"type": "status", "message": "正在评审结果..."}
                 final_state = state
+                # 评审后如果有修订计划，通知前端
+                revised_plan = state.get("plan", [])
+                if revised_plan and not state.get("is_complete", True):
+                    yield {"type": "status", "message": f"评审发现需要补充 {len(revised_plan)} 个步骤，继续执行..."}
 
     if final_state:
         feedback = final_state.get("review_feedback", "")
         is_complete = final_state.get("is_complete", True)
+        final_plan = final_state.get("plan", plan)
+        graph_step_count = final_state.get("step_count", 0)
+        # 检查是否因 MAX_STEPS 被强制结束
+        if not is_complete and graph_step_count >= MAX_STEPS:
+            max_steps_reached = True
     else:
         feedback = ""
         is_complete = True
+        final_plan = plan
+
+    # MAX_STEPS 强制结束时，追加提示
+    if max_steps_reached:
+        if feedback:
+            feedback += "\n\n⚠️ 已达到最大执行轮次限制，部分任务可能未完成。"
+        else:
+            feedback = "已达到最大执行轮次限制，部分任务可能未完成。"
 
     if not feedback:
         yield {"type": "status", "message": "正在总结回答..."}
-        
-        context = build_context(query)
-        cap_desc = "\n".join(f"- {c['name']}: {c['description']}" for c in registry.list_capabilities())
-        
+
         summary_prompt = f"""总结以下任务执行结果：
 
 用户问题: {query}
@@ -604,10 +632,10 @@ def run_graph_stream(query: str, conv_id: str = None):
         messages = [{"role": "system", "content": "你是一个专业的开发助手"}, {"role": "user", "content": summary_prompt}]
         full_response = ""
         
-        for chunk in client.chat.completions.create(
+        async for chunk in await client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            temperature=TEMPERATURE,
+            temperature=TEMPERATURE_CHAT,
             stream=True
         ):
             if chunk.choices[0].delta.content:
@@ -616,15 +644,20 @@ def run_graph_stream(query: str, conv_id: str = None):
                 yield {"type": "token", "content": token}
         feedback = full_response
 
-    update_profile(_extract_preferences(query, plan, trace))
-    
-    if not is_complete and plan and conv_id:
-        save_pending_task(conv_id, plan)
+    await asyncio.to_thread(update_profile, _extract_preferences(query, plan, trace))
+
+    # 未完成时保存待办任务 — 使用 final_plan（可能含修订计划）
+    if not is_complete and final_plan and conv_id:
+        logger.info("保存待办任务: conv_id=%s, plan_steps=%d", conv_id, len(final_plan))
+        await asyncio.to_thread(save_pending_task, conv_id, final_plan)
+
+    logger.info("run_graph_stream: 完成 (is_complete=%s, steps=%d, tools=%d)", 
+                is_complete, total_step_count, len(trace))
 
     yield {
         "type": "done",
         "response": feedback,
-        "context_used": len(build_context(query)) > 0,
+        "context_used": len(context) > 0,
         "tool_executions": trace,
         "plan": plan,
         "plan_steps": len(plan),

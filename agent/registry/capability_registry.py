@@ -1,5 +1,7 @@
 """能力注册中心 — 统一管理所有能力，为 Agent 提供工具列表和执行入口"""
 
+from agent.exceptions import ToolError
+
 
 class CapabilityRegistry:
     def __init__(self):
@@ -33,7 +35,7 @@ class CapabilityRegistry:
             handlers = capability.get_handlers()
             if tool_name in handlers:
                 return capability.execute(tool_name, arguments)
-        return f"❌ 未知工具: {tool_name}"
+        raise ToolError(f"未知工具: {tool_name}", tool_name)
 
     def list_capabilities(self) -> list:
         """列出所有已注册能力"""
@@ -48,9 +50,11 @@ def create_default_registry() -> CapabilityRegistry:
     from agent.capabilities.filesystem.capability import FileSystemCapability
     from agent.capabilities.memory.capability import MemoryCapability
     from agent.capabilities.document.capability import DocumentCapability
+    from agent.capabilities.project.capability import ProjectCapability
 
     registry = CapabilityRegistry()
     registry.register(FileSystemCapability())
     registry.register(MemoryCapability())
     registry.register(DocumentCapability())
+    registry.register(ProjectCapability())
     return registry

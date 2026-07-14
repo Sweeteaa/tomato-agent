@@ -1,7 +1,11 @@
-"""记忆工具层 — 负责长期记忆的读写操作"""
+"""记忆工具层 — 负责长期记忆的读写操作
+
+错误处理: 抛出 ResourceNotFoundError 异常而非返回 ❌ 字符串
+"""
 
 from pathlib import Path
 from app.config import WORKSPACE
+from agent.exceptions import ResourceNotFoundError
 
 
 def save_memory(name: str, content: str) -> str:
@@ -13,10 +17,14 @@ def save_memory(name: str, content: str) -> str:
 
 
 def read_memory(name: str) -> str:
-    """读取一条长期记忆"""
+    """读取一条长期记忆
+
+    Raises:
+        ResourceNotFoundError: 记忆不存在
+    """
     file_path = WORKSPACE / "memory" / f"{name}.md"
     if not file_path.exists():
-        return f"❌ 记忆不存在: {name}"
+        raise ResourceNotFoundError("记忆", name, "memory")
     return file_path.read_text(encoding="utf-8")
 
 
@@ -32,10 +40,14 @@ def list_memory() -> str:
 
 
 def delete_memory(name: str) -> str:
-    """删除一条记忆"""
+    """删除一条记忆
+
+    Raises:
+        ResourceNotFoundError: 记忆不存在
+    """
     file_path = WORKSPACE / "memory" / f"{name}.md"
     if not file_path.exists():
-        return f"❌ 记忆不存在: {name}"
+        raise ResourceNotFoundError("记忆", name, "memory")
     file_path.unlink()
     return f"✅ 记忆删除成功: {name}"
 

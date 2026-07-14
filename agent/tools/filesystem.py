@@ -1,90 +1,466 @@
-"""文件系统工具层 — 只负责文件操作，不包含业务逻辑"""
+"""文件系统工具层 — 统一支持绝对路径和 workspace 相对路径
+
+合并了原 agent/tools/filesystem.py 和 app/services/filesystem_tool.py 的功能:
+- 绝对路径: 用于扫描用户项目 (D:/projects/xxx)
+- 相对路径: 用于 workspace 内操作 (skill/hello.md)
+- 新增 scan_menu_structure (原只在 app/tools.py 定义，registry 中不存在)
+- 修复路径遍历漏洞: 所有路径 resolve 后检查是否在允许范围内
+- 错误处理: 抛出 ToolError 异常而非返回 ❌ 字符串
+"""
 
 import os
+import json
+import re
 from pathlib import Path
-from app.config import WORKSPACE
+from app.config import WORKSPACE, SCAN_IGNORE_DIRS, SCAN_ALLOWED_EXTENSIONS
+from agent.exceptions import ToolError, FileNotFoundError as FileNotFound, PathSecurityError
 
 
-def read_file(path: str) -> str:
-    """读取文件内容"""
-    file_path = WORKSPACE / path
+# ─── 安全路径解析 ───
+
+def _resolve_path(path_str: str, restrict_to_workspace: bool = False) -> Path:
+    """解析路径，支持绝对路径和 workspace 相对路径
+
+    Args:
+        path_str: 路径字符串，可为绝对路径或 workspace 相对路径
+        restrict_to_workspace: 是否限制在 workspace 内 (写/删/追加操作必须限制)
+
+    Returns:
+        解析后的绝对 Path 对象
+
+    Raises:
+        PathSecurityError: 路径遍历攻击或安全限制
+    """
+    if not path_str:
+        return WORKSPACE.resolve()
+
+    p = Path(path_str)
+
+    if p.is_absolute():
+        resolved = p.resolve()
+        if restrict_to_workspace:
+            raise PathSecurityError(
+                f"安全限制: 写入/删除操作只允许在 workspace 内，"
+                f"提供的绝对路径 '{path_str}' 超出范围"
+            )
+        return resolved
+    else:
+        # workspace 相对路径
+        resolved = (WORKSPACE / path_str).resolve()
+        ws_resolved = WORKSPACE.resolve()
+        resolved_str = str(resolved).replace("\\", "/").lower()
+        ws_str = str(ws_resolved).replace("\\", "/").lower()
+        if not resolved_str.startswith(ws_str):
+            raise PathSecurityError(f"路径遍历攻击: '{path_str}' 逃出 workspace 范围")
+        return resolved
+
+
+def _is_ignored(path: Path) -> bool:
+    """检查路径是否应被忽略（使用 config.py 中统一的 SCAN_IGNORE_DIRS）"""
+    for part in path.parts:
+        if part in SCAN_IGNORE_DIRS:
+            return True
+    return False
+
+
+# ─── 读取类工具（支持绝对路径 + 相对路径）───
+
+def read_file(path: str, max_size: int = 1048576) -> str:
+    """读取文件内容
+
+    支持绝对路径（如 D:/projects/xxx/src/App.vue）和 workspace 相对路径。
+    读取操作不限制路径范围，但会检查文件大小防止内存溢出。
+
+    Raises:
+        PathSecurityError: 路径安全限制
+        FileNotFound: 文件不存在
+        ToolError: 不是文件 / 文件过大 / 无权限
+    """
+    file_path = _resolve_path(path, restrict_to_workspace=False)
+
     if not file_path.exists():
-        return f"❌ 文件不存在: {path}"
-    return file_path.read_text(encoding="utf-8")
+        raise FileNotFound(path)
+    if not file_path.is_file():
+        raise ToolError(f"不是文件: {path}", "read_file")
 
+    file_size = file_path.stat().st_size
+    if file_size > max_size:
+        raise ToolError(f"文件过大（{file_size} bytes），最大支持 {max_size} bytes", "read_file")
+
+    try:
+        return file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return file_path.read_text(encoding="utf-8", errors="replace")
+    except PermissionError:
+        raise ToolError(f"无权限读取: {path}", "read_file")
+
+
+def list_dir(path: str = "", recursive: bool = False, max_depth: int = 5) -> str:
+    """列出目录内容
+
+    支持绝对路径（如 D:/projects/xxx）和 workspace 相对路径。
+    - recursive=False: 简单模式，返回扁平列表
+    - recursive=True: 递归模式，返回结构化 JSON
+
+    Raises:
+        PathSecurityError: 路径安全限制
+        ToolError: 目录不存在 / 不是目录
+    """
+    dir_path = _resolve_path(path, restrict_to_workspace=False)
+
+    if not dir_path.exists():
+        raise ToolError(f"目录不存在: {path}", "list_dir")
+    if not dir_path.is_dir():
+        raise ToolError(f"不是目录: {path}", "list_dir")
+
+    if recursive:
+        result = _scan_directory_recursive(dir_path, max_depth)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    else:
+        return _list_flat(dir_path)
+
+
+def _list_flat(dir_path: Path) -> str:
+    """简单模式: 列出当前目录内容"""
+    try:
+        children = sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+    except PermissionError:
+        raise ToolError("无权限访问目录", "list_dir")
+
+    items = []
+    for child in children:
+        if _is_ignored(child):
+            continue
+        prefix = "📁 " if child.is_dir() else "📄 "
+        size_info = ""
+        if child.is_file():
+            try:
+                size_info = f" ({child.stat().st_size} bytes)"
+            except OSError:
+                pass
+        items.append(f"{prefix}{child.name}{size_info}")
+
+    return "\n".join(items) if items else "目录为空"
+
+
+def _scan_directory_recursive(root: Path, max_depth: int) -> dict:
+    """递归扫描目录，返回结构化结果"""
+    result = {
+        "path": str(root),
+        "name": root.name,
+        "type": "directory",
+        "items": [],
+    }
+
+    def collect(path: Path, current_depth: int):
+        if current_depth > max_depth:
+            return
+        try:
+            items = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        except PermissionError:
+            return
+
+        for item in items:
+            if _is_ignored(item):
+                continue
+
+            info = {
+                "name": item.name,
+                "type": "directory" if item.is_dir() else "file",
+                "path": str(item),
+            }
+
+            if item.is_file():
+                info["extension"] = item.suffix.lower()
+                try:
+                    info["size"] = item.stat().st_size
+                except OSError:
+                    info["size"] = 0
+
+            if item.is_dir() and current_depth < max_depth:
+                sub_items = []
+                _collect_recursive(item, current_depth + 1, sub_items, max_depth)
+                info["children"] = sub_items
+
+            result["items"].append(info)
+
+    collect(root, 0)
+    return result
+
+
+def _collect_recursive(path: Path, depth: int, accumulator: list, max_depth: int):
+    """递归收集子目录内容"""
+    if depth > max_depth:
+        return
+    try:
+        items = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    except PermissionError:
+        return
+
+    for item in items:
+        if _is_ignored(item):
+            continue
+        info = {
+            "name": item.name,
+            "type": "directory" if item.is_dir() else "file",
+            "path": str(item),
+        }
+        if item.is_file():
+            info["extension"] = item.suffix.lower()
+            try:
+                info["size"] = item.stat().st_size
+            except OSError:
+                info["size"] = 0
+        accumulator.append(info)
+        if item.is_dir() and depth < max_depth:
+            _collect_recursive(item, depth + 1, accumulator, max_depth)
+
+
+def search_file(query: str = "", keyword: str = "", root_path: str = "", max_results: int = 20) -> str:
+    """搜索文件内容
+
+    两种模式:
+    1. workspace 模式: 只传 query, 在 workspace 内搜索
+    2. 项目模式: 传 keyword + root_path, 在指定项目目录内搜索 (推荐用于扫描用户项目)
+
+    Raises:
+        ToolError: 缺少必要参数 / 路径不存在 / 不是目录
+    """
+    if keyword and root_path:
+        # 项目模式
+        root = Path(root_path).resolve()
+        if not root.exists():
+            raise ToolError(f"路径不存在: {root_path}", "search_file")
+        if not root.is_dir():
+            raise ToolError(f"不是目录: {root_path}", "search_file")
+
+        results = []
+        keyword_lower = keyword.lower()
+
+        for file_path in root.rglob("*"):
+            if _is_ignored(file_path):
+                continue
+            if not file_path.is_file():
+                continue
+            if file_path.suffix.lower() not in SCAN_ALLOWED_EXTENSIONS:
+                continue
+
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                if keyword_lower in content.lower():
+                    results.append({
+                        "file": str(file_path),
+                        "relative_path": str(file_path.relative_to(root)),
+                        "name": file_path.name,
+                    })
+                    if len(results) >= max_results:
+                        break
+            except (PermissionError, OSError):
+                continue
+
+        if not results:
+            return f"在 {root_path} 中未找到包含 '{keyword}' 的文件"
+        return json.dumps(results, ensure_ascii=False, indent=2)
+
+    elif query:
+        # workspace 模式
+        results = []
+        for root_dir, dirs, files in os.walk(WORKSPACE):
+            dirs[:] = [d for d in dirs if d not in SCAN_IGNORE_DIRS]
+            for name in files:
+                file_path = Path(root_dir) / name
+                if file_path.suffix.lower() not in SCAN_ALLOWED_EXTENSIONS:
+                    continue
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    if query.lower() in content.lower():
+                        rel_path = file_path.relative_to(WORKSPACE)
+                        results.append(str(rel_path))
+                except (PermissionError, OSError):
+                    continue
+
+        if not results:
+            return f"未找到包含 '{query}' 的文件"
+        return f"找到 {len(results)} 个匹配文件:\n" + "\n".join(results)
+
+    else:
+        raise ToolError("请提供 query（workspace 搜索）或 keyword + root_path（项目搜索）", "search_file")
+
+
+def scan_menu_structure(project_path: str) -> str:
+    """扫描项目中的菜单组件和路由配置文件，提取页面路径
+
+    搜索文件名包含 menu/sidebar/nav/routes/router 关键词的 .vue/.ts/.js 文件，
+    提取其中定义的路由和页面路径信息。
+
+    Raises:
+        ToolError: 项目路径不存在 / 不是目录
+    """
+    root = Path(project_path).resolve()
+    if not root.exists():
+        raise ToolError(f"项目路径不存在: {project_path}", "scan_menu_structure")
+    if not root.is_dir():
+        raise ToolError(f"不是目录: {project_path}", "scan_menu_structure")
+
+    menu_files = []
+    menu_keywords = ["menu", "sidebar", "nav", "navigation", "routes", "router"]
+
+    for pattern in ["*.vue", "*.ts", "*.js"]:
+        for file in root.rglob(pattern):
+            if _is_ignored(file):
+                continue
+            filename_lower = file.name.lower()
+            if any(kw in filename_lower for kw in menu_keywords):
+                menu_files.append(file)
+
+    menu_info = {
+        "menu_files": [],
+        "extracted_routes": [],
+        "route_file_paths": [],
+        "menu_component_paths": [],
+    }
+
+    for file in sorted(menu_files):
+        rel_path = str(file.relative_to(root)).replace("\\", "/")
+        is_menu_comp = any(kw in rel_path.lower() for kw in ["menu", "sidebar", "nav"])
+
+        try:
+            content = file.read_text(encoding="utf-8", errors="ignore")
+        except (PermissionError, OSError):
+            continue
+
+        routes = _extract_routes_from_content(content)
+
+        entry = {
+            "file": str(file),
+            "relative_path": rel_path,
+            "type": "menu_component" if is_menu_comp else "route_config",
+            "extracted_routes": routes,
+        }
+
+        if is_menu_comp:
+            menu_info["menu_component_paths"].append(rel_path)
+        else:
+            menu_info["route_file_paths"].append(rel_path)
+
+        menu_info["menu_files"].append(entry)
+        menu_info["extracted_routes"].extend(routes)
+
+    menu_info["extracted_routes"] = sorted(set(menu_info["extracted_routes"]))
+
+    return json.dumps(menu_info, ensure_ascii=False, indent=2)
+
+
+def _extract_routes_from_content(content: str) -> list[str]:
+    """从文件内容中提取路由/path/url 信息"""
+    routes = []
+
+    url_patterns = [
+        r"(?<![a-zA-Z])url\s*[=:]\s*['\"]([^'\"]+)['\"]",
+        r"(?<![a-zA-Z])path\s*[=:]\s*['\"]([^'\"]+)['\"]",
+        r"(?<![a-zA-Z])component\s*[=:]\s*['\"]([^'\"]+)['\"]",
+        r"import\s+.*from\s+['\"]([^'\"]+)['\"]",
+        r"(?<![a-zA-Z])href\s*[=:]\s*['\"]([^'\"]+)['\"]",
+        r"(?<![a-zA-Z])router-link[^>]*to\s*=\s*['\"]([^'\"]+)['\"]",
+    ]
+
+    for pattern in url_patterns:
+        matches = re.findall(pattern, content)
+        for match in matches:
+            if (match.startswith("/")
+                or match.startswith("@/")
+                or match.startswith("./")
+                or match.startswith("../")
+                or match.endswith(".vue")):
+                routes.append(match)
+
+    special_patterns = [
+        r"import\(\s*['\"]([^'\"]+)['\"]\s*\)",
+        r"resolve\(\s*['\"]([^'\"]+)['\"]\s*\)",
+        r"require\(\s*['\"]([^'\"]+)['\"]\s*\)",
+    ]
+
+    for pattern in special_patterns:
+        matches = re.findall(pattern, content)
+        routes.extend(matches)
+
+    return sorted(set(routes))
+
+
+# ─── 写入类工具（仅限 workspace 内操作）───
 
 def write_file(path: str, content: str) -> str:
-    """创建或覆盖文件"""
-    file_path = WORKSPACE / path
+    """创建或覆盖文件（仅限 workspace 内操作）
+
+    Raises:
+        PathSecurityError: 路径安全限制
+    """
+    file_path = _resolve_path(path, restrict_to_workspace=True)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content, encoding="utf-8")
     return f"✅ 文件创建成功: {path}"
 
 
 def delete_file(path: str) -> str:
-    """删除文件"""
-    file_path = WORKSPACE / path
+    """删除文件（仅限 workspace 内操作）
+
+    Raises:
+        PathSecurityError: 路径安全限制
+        FileNotFound: 文件不存在
+    """
+    file_path = _resolve_path(path, restrict_to_workspace=True)
     if not file_path.exists():
-        return f"❌ 文件不存在: {path}"
+        raise FileNotFound(path)
     file_path.unlink()
     return f"✅ 文件删除成功: {path}"
 
 
 def append_file(path: str, content: str) -> str:
-    """向文件末尾追加内容"""
-    file_path = WORKSPACE / path
+    """向文件末尾追加内容（仅限 workspace 内操作）
+
+    Raises:
+        PathSecurityError: 路径安全限制
+    """
+    file_path = _resolve_path(path, restrict_to_workspace=True)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with open(file_path, "a", encoding="utf-8") as f:
         f.write("\n" + content)
     return f"✅ 文件追加成功: {path}"
 
 
-def search_file(query: str) -> str:
-    """在 workspace 中搜索文件内容"""
-    results = []
-    for root, dirs, files in os.walk(WORKSPACE):
-        for name in files:
-            file_path = Path(root) / name
-            if file_path.suffix in (".md", ".json", ".txt", ".py"):
-                content = file_path.read_text(encoding="utf-8", errors="ignore")
-                if query.lower() in content.lower():
-                    rel_path = file_path.relative_to(WORKSPACE)
-                    results.append(str(rel_path))
-    if not results:
-        return f"未找到包含 '{query}' 的文件"
-    return f"找到 {len(results)} 个匹配文件:\n" + "\n".join(results)
-
-
-def list_dir(path: str = "") -> str:
-    """列出目录内容"""
-    dir_path = WORKSPACE / path if path else WORKSPACE
-    if not dir_path.exists():
-        return f"❌ 目录不存在: {path}"
-    items = []
-    for child in sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name)):
-        prefix = "📁 " if child.is_dir() else "📄 "
-        items.append(f"{prefix}{child.name}")
-    return "\n".join(items) if items else "目录为空"
-
-
 def create_folder(path: str) -> str:
-    """创建文件夹"""
-    folder_path = WORKSPACE / path
+    """创建文件夹（仅限 workspace 内操作）
+
+    Raises:
+        PathSecurityError: 路径安全限制
+    """
+    folder_path = _resolve_path(path, restrict_to_workspace=True)
     folder_path.mkdir(parents=True, exist_ok=True)
     return f"✅ 文件夹创建成功: {path}"
 
 
-# 工具定义（OpenAI function calling 格式）
+# ─── 工具定义（OpenAI function calling 格式）───
+# 合并了原 agent/tools/filesystem.py 和 app/tools.py 的定义
+# 统一支持绝对路径（项目扫描）和相对路径（workspace 操作）
+
 tool_definitions = [
     {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取文件内容",
+            "description": "读取文件内容。支持绝对路径（如 D:/projects/xxx/src/App.vue，用于读取用户项目文件）和 workspace 相对路径（如 skill/hello.md）。当用户要求查看文件内容、分析代码时，必须使用此工具获取真实内容，禁止猜测文件内容",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "文件路径，相对于 workspace 目录"}
+                    "path": {
+                        "type": "string",
+                        "description": "文件路径。绝对路径如 'D:/projects/xxx/src/App.vue'；workspace 相对路径如 'skill/hello.md'"
+                    },
+                    "max_size": {
+                        "type": "integer",
+                        "description": "最大读取字节数，默认 1MB",
+                        "default": 1048576
+                    }
                 },
                 "required": ["path"]
             }
@@ -93,12 +469,86 @@ tool_definitions = [
     {
         "type": "function",
         "function": {
-            "name": "write_file",
-            "description": "创建或覆盖一个文件",
+            "name": "list_dir",
+            "description": "列出目录内容，返回真实的文件系统结构。支持绝对路径（如 D:/projects/xxx，用于扫描用户项目）和 workspace 相对路径。当用户要求扫描项目、查看目录结构时，必须使用此工具获取真实结果，禁止猜测或推断目录结构",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "文件路径，相对于 workspace 目录"},
+                    "path": {
+                        "type": "string",
+                        "description": "目录路径。绝对路径如 'D:/projects/xxx'（扫描用户项目）；workspace 相对路径如 'skill'；留空为 workspace 根目录"
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "是否递归列出子目录内容，默认 false",
+                        "default": False
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "递归的最大深度，默认 5，建议设置为 5-10 以确保扫描到深层目录结构",
+                        "default": 5
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_file",
+            "description": "搜索文件内容。两种模式：1) 传 query 在 workspace 内搜索（简单模式）；2) 传 keyword + root_path 在指定项目目录内搜索（项目模式，推荐用于扫描用户项目）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "workspace 内搜索的关键词（简单模式）"
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "项目内搜索的关键词（项目模式，需配合 root_path），如 'dashboard' 或 'followup_status'"
+                    },
+                    "root_path": {
+                        "type": "string",
+                        "description": "搜索的根目录绝对路径（项目模式，如 'D:/projects/xxx'）"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最大返回结果数，默认 20",
+                        "default": 20
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_menu_structure",
+            "description": "扫描项目中的菜单组件和路由配置文件，提取其中定义的页面路径。当用户要求分析项目结构、查找业务页面时，必须先调用此工具获取菜单和路由信息，这是定位真实页面路径的最准确方法",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {
+                        "type": "string",
+                        "description": "项目的绝对路径，如 'D:/projects/xxx'"
+                    }
+                },
+                "required": ["project_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "创建或覆盖文件（仅限 workspace 目录内操作，不支持绝对路径）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "文件路径，相对于 workspace 目录，如 'skill/hello.md'"},
                     "content": {"type": "string", "description": "文件内容"}
                 },
                 "required": ["path", "content"]
@@ -109,7 +559,7 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "删除文件",
+            "description": "删除文件（仅限 workspace 目录内操作，不支持绝对路径）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -123,7 +573,7 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "append_file",
-            "description": "向文件末尾追加内容",
+            "description": "向文件末尾追加内容（仅限 workspace 目录内操作，不支持绝对路径）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -137,36 +587,8 @@ tool_definitions = [
     {
         "type": "function",
         "function": {
-            "name": "search_file",
-            "description": "在 workspace 中搜索文件内容",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "搜索关键词"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_dir",
-            "description": "列出目录内容",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "目录路径，相对于 workspace 目录，默认为根目录"}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "create_folder",
-            "description": "创建文件夹",
+            "description": "创建文件夹（仅限 workspace 目录内操作，不支持绝对路径）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -178,13 +600,24 @@ tool_definitions = [
     },
 ]
 
-# 工具执行映射
+# ─── 工具执行映射 ───
+
 tool_handlers = {
-    "read_file": lambda args: read_file(args["path"]),
+    "read_file": lambda args: read_file(args["path"], max_size=args.get("max_size", 1048576)),
+    "list_dir": lambda args: list_dir(
+        path=args.get("path", ""),
+        recursive=args.get("recursive", False),
+        max_depth=args.get("max_depth", 5)
+    ),
+    "search_file": lambda args: search_file(
+        query=args.get("query", ""),
+        keyword=args.get("keyword", ""),
+        root_path=args.get("root_path", ""),
+        max_results=args.get("max_results", 20)
+    ),
+    "scan_menu_structure": lambda args: scan_menu_structure(args["project_path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
     "delete_file": lambda args: delete_file(args["path"]),
     "append_file": lambda args: append_file(args["path"], args["content"]),
-    "search_file": lambda args: search_file(args["query"]),
-    "list_dir": lambda args: list_dir(args.get("path", "")),
     "create_folder": lambda args: create_folder(args["path"]),
 }
