@@ -13,3 +13,17 @@ async def upload_file_endpoint(file: UploadFile = File(...)):
 @router.get("/search")
 async def search_workspace_endpoint(q: str):
     return search_workspace(q)
+
+
+@router.get("/select-folder")
+async def select_folder_endpoint():
+    import tkinter as tk
+    from tkinter import filedialog
+    
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    
+    folder = filedialog.askdirectory(title="选择项目目录")
+    
+    return {"path": folder}

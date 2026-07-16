@@ -136,6 +136,7 @@
                 <div class="mb-2">
                     <div class="flex items-center justify-between mb-2">
                         <span class="text-xs text-gray-400"><i class="fas fa-upload"></i> 拖拽文件到聊天区域上传（支持 Word、Excel、图片）</span>
+                        <button onclick="selectProject()" class="text-xs text-indigo-500 hover:text-indigo-600 cursor-pointer">选择项目</button>
                         <button onclick="document.getElementById('chat-file-input').click()" class="text-xs text-indigo-500 hover:text-indigo-600 cursor-pointer">点击上传</button>
                     </div>
                     <input id="chat-file-input" type="file" multiple accept=".docx,.xlsx,.jpg,.jpeg,.png,.gif,.txt,.md" class="hidden" onchange="handleFileSelect(this)">
@@ -184,7 +185,7 @@
                         <span>暂无画像数据</span>
                     </div>
                     <!-- 气泡布局：均匀换行、固定gap间距，所有气泡完整展示无重叠遮挡 -->
-                    <div id="bubble-wrap" class="hidden w-full h-full flex flex-wrap items-center justify-center gap-3 content-center">
+                    <div id="bubble-wrap" class="hidden w-full h-full flex flex-wrap items-center justify-center gap-1 content-center">
                     </div>
                 </div>
             </div>
@@ -343,6 +344,52 @@
             input.value = '';
         }
 
+        let selectedProjectPath = '';
+        let isSelectingProject = false;
+
+        async function selectProject() {
+            isSelectingProject = true;
+            const btn = document.getElementById('send-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 选择项目中...';
+            
+            const res = await fetch("/api/select-folder");
+            const data = await res.json();
+            
+            isSelectingProject = false;
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-paper-plane"></i> 发送';
+            
+            if (data.path) {
+                selectedProjectPath = data.path;
+                showProjectTag(data.path);
+            }
+        }
+
+        function showProjectTag(path) {
+            const tagContainer = document.getElementById('uploaded-files');
+            const projectName = path.split(/[\\/]/).pop();
+            
+            const projectDiv = document.createElement('div');
+            projectDiv.id = 'project-tag-item';
+            projectDiv.className = 'flex items-center gap-2 px-3 py-1.5 bg-gray-100 rounded-lg text-xs';
+            projectDiv.innerHTML = `
+                <i class="fas fa-folder text-indigo-500"></i>
+                <span class="text-gray-700 truncate max-w-[120px]">${projectName}</span>
+                <button onclick="clearProjectTag()" class="text-gray-400 hover:text-red-500"><i class="fas fa-times"></i></button>
+            `;
+            
+            tagContainer.insertBefore(projectDiv, tagContainer.firstChild);
+        }
+
+        function clearProjectTag() {
+            selectedProjectPath = '';
+            const projectDiv = document.getElementById('project-tag-item');
+            if (projectDiv) {
+                projectDiv.remove();
+            }
+        }
+
         function handleDrop(event) {
             const files = event.dataTransfer.files;
             if (files.length > 0) {
@@ -396,6 +443,7 @@
                 const res = await fetch('/api/conversations', { method: 'POST' });
                 const data = await res.json();
                 currentConvId = data.id;
+                selectedProjectPath = '';
                 document.getElementById('chat-messages').innerHTML = `
                     <div class="text-center text-gray-400 text-sm py-4">
                         <i class="fas fa-comments text-3xl mb-2 opacity-50 block"></i>
@@ -421,6 +469,12 @@
                 el.innerHTML = `<i class="fas fa-heartbeat"></i> 离线`;
             }
         }
+
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Delete' && selectedProjectPath) {
+                clearProjectTag();
+            }
+        });
 
         async function loadConversations() {
             try {
@@ -728,12 +782,30 @@
             const btn = document.getElementById('send-btn');
             const message = input.value.trim();
             
-            if (!message && uploadedFiles.length === 0) return;
+            if (!message && !selectedProjectPath && uploadedFiles.length === 0) return;
             
-            let displayMessage = message;
+            if (isSelectingProject) {
+                addMessage('assistant', '❌ 请等待项目选择完成后再发送消息');
+                return;
+            }
+            
+            let finalMessage = message;
+            if (selectedProjectPath) {
+                if (finalMessage) {
+                    finalMessage = `项目路径: ${selectedProjectPath}\n\n${finalMessage}`;
+                } else {
+                    finalMessage = selectedProjectPath;
+                }
+                // 发送后清除项目路径，避免后续消息重复携带触发扫描
+                selectedProjectPath = '';
+                const projectDiv = document.getElementById('project-tag-item');
+                if (projectDiv) projectDiv.remove();
+            }
+            
+            let displayMessage = finalMessage;
             if (uploadedFiles.length > 0) {
                 const fileNames = uploadedFiles.map(f => f.file.name).join(', ');
-                displayMessage = `${message || ''} (上传了 ${uploadedFiles.length} 个文件: ${fileNames})`;
+                displayMessage = `${finalMessage || ''} (上传了 ${uploadedFiles.length} 个文件: ${fileNames})`;
             }
             
             addMessage('user', displayMessage);
@@ -750,7 +822,7 @@
             
             try {
                 const formData = new FormData();
-                if (message) formData.append('message', message);
+                if (finalMessage) formData.append('message', finalMessage);
                 if (currentConvId) formData.append('conversation_id', currentConvId);
                 
                 uploadedFiles.forEach(item => {

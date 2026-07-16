@@ -65,11 +65,16 @@ def _is_ignored(path: Path) -> bool:
 
 # ─── 读取类工具（支持绝对路径 + 相对路径）───
 
-def read_file(path: str, max_size: int = 1048576) -> str:
+def read_file(path: str, max_size: int = 1048576, start_line: int = 0, end_line: int = 0) -> str:
     """读取文件内容
 
     支持绝对路径（如 D:/projects/xxx/src/App.vue）和 workspace 相对路径。
     读取操作不限制路径范围，但会检查文件大小防止内存溢出。
+
+    分页读取:
+    - start_line/end_line 均从 1 开始，0 表示不限制
+    - 当文件过大时，可指定行范围分段读取
+    - 返回 JSON 格式: {path, total_lines, start_line, end_line, content}
 
     Raises:
         PathSecurityError: 路径安全限制
@@ -84,15 +89,54 @@ def read_file(path: str, max_size: int = 1048576) -> str:
         raise ToolError(f"不是文件: {path}", "read_file")
 
     file_size = file_path.stat().st_size
-    if file_size > max_size:
-        raise ToolError(f"文件过大（{file_size} bytes），最大支持 {max_size} bytes", "read_file")
 
     try:
-        return file_path.read_text(encoding="utf-8")
+        content = file_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return file_path.read_text(encoding="utf-8", errors="replace")
+        content = file_path.read_text(encoding="utf-8", errors="replace")
     except PermissionError:
         raise ToolError(f"无权限读取: {path}", "read_file")
+
+    lines = content.splitlines()
+    total_lines = len(lines)
+
+    # 分页模式
+    if start_line > 0 or end_line > 0:
+        s = max(1, start_line) - 1  # 转为 0-based index
+        e = end_line if end_line > 0 else total_lines
+        e = min(e, total_lines)
+        page_lines = lines[s:e]
+        page_content = "\n".join(page_lines)
+
+        result = {
+            "path": str(file_path),
+            "total_lines": total_lines,
+            "start_line": s + 1,
+            "end_line": e,
+            "content": page_content,
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    # 全文模式：检查大小
+    if file_size > max_size:
+        preview_lines = min(200, total_lines)
+        result = {
+            "path": str(file_path),
+            "total_lines": total_lines,
+            "start_line": 1,
+            "end_line": preview_lines,
+            "content": "\n".join(lines[:preview_lines]),
+            "truncated": True,
+            "message": f"文件过大（{file_size} bytes），已返回前 {preview_lines} 行。使用 start_line/end_line 参数读取更多内容。",
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    result = {
+        "path": str(file_path),
+        "total_lines": total_lines,
+        "content": content,
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 def list_dir(path: str = "", recursive: bool = False, max_depth: int = 5) -> str:
@@ -115,32 +159,45 @@ def list_dir(path: str = "", recursive: bool = False, max_depth: int = 5) -> str
 
     if recursive:
         result = _scan_directory_recursive(dir_path, max_depth)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        return json.dumps(result, ensure_ascii=False, indent=5)
     else:
         return _list_flat(dir_path)
 
 
 def _list_flat(dir_path: Path) -> str:
-    """简单模式: 列出当前目录内容"""
+    """简单模式: 列出当前目录内容，返回结构化 JSON"""
     try:
         children = sorted(dir_path.iterdir(), key=lambda x: (not x.is_dir(), x.name))
     except PermissionError:
         raise ToolError("无权限访问目录", "list_dir")
 
-    items = []
+    dirs = []
+    files = []
+    important_files = []
+    
+    important_extensions = [".json", ".js", ".ts", ".vue", ".html", ".md"]
+    
     for child in children:
         if _is_ignored(child):
             continue
-        prefix = "📁 " if child.is_dir() else "📄 "
-        size_info = ""
-        if child.is_file():
-            try:
-                size_info = f" ({child.stat().st_size} bytes)"
-            except OSError:
-                pass
-        items.append(f"{prefix}{child.name}{size_info}")
+        if child.is_dir():
+            dirs.append(child.name)
+        else:
+            files.append({
+                "name": child.name,
+                "size": child.stat().st_size if child.exists() else 0,
+            })
+            if any(child.name.endswith(ext) for ext in important_extensions):
+                important_files.append(child.name)
 
-    return "\n".join(items) if items else "目录为空"
+    result = {
+        "path": str(dir_path),
+        "dirs": dirs,
+        "files": files,
+        "important_files": important_files,
+    }
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 def _scan_directory_recursive(root: Path, max_depth: int) -> dict:
@@ -201,16 +258,51 @@ def search_file(query: str = "", keyword: str = "", root_path: str = "",
     - 支持逗号分隔的多关键词（OR 逻辑，任一匹配即返回）
     - 自动排除 .md/.json 等生成文档，优先搜索源码文件
 
+    参数类型容错:
+    - keyword/file_extensions: list → ",".join(list)
+    - 所有字符串参数: None → ""
+
     Raises:
         ToolError: 缺少必要参数 / 路径不存在 / 不是目录
     """
+    # 参数类型容错
+    if keyword is None:
+        keyword = ""
+    if isinstance(keyword, list):
+        keyword = ",".join(keyword)
+    
+    if file_extensions is None:
+        file_extensions = ""
+    if isinstance(file_extensions, list):
+        file_extensions = ",".join(file_extensions)
+    
+    if root_path is None:
+        root_path = ""
+    if isinstance(root_path, list):
+        root_path = root_path[0] if root_path else ""
+
     if keyword and root_path:
         # 项目模式 — 增强版，返回匹配行+上下文
         root = Path(root_path).resolve()
+        
+        if not root.exists():
+            # 尝试向上查找最近的存在的目录
+            candidates = []
+            current = root
+            while current.parent != current:
+                if current.exists():
+                    candidates.append(current)
+                current = current.parent
+            if candidates:
+                root = candidates[0]
+            else:
+                raise ToolError(f"路径不存在: {root_path}", "search_file")
+        
+        if not root.is_dir():
+            root = root.parent
+        
         if not root.exists():
             raise ToolError(f"路径不存在: {root_path}", "search_file")
-        if not root.is_dir():
-            raise ToolError(f"不是目录: {root_path}", "search_file")
 
         # 解析关键词列表（逗号分隔 → OR 逻辑）
         keywords = [k.strip().lower() for k in keyword.split(",") if k.strip()]
@@ -307,8 +399,10 @@ def search_file(query: str = "", keyword: str = "", root_path: str = "",
 def scan_menu_structure(project_path: str) -> str:
     """扫描项目中的菜单组件和路由配置文件，提取页面路径
 
-    搜索文件名包含 menu/sidebar/nav/routes/router 关键词的 .vue/.ts/.js 文件，
-    提取其中定义的路由和页面路径信息。
+    搜索策略：
+    1. 主动检查常见路由路径：src/router/index.js、src/router/index.ts、src/main.js 等
+    2. 搜索文件名包含 menu/sidebar/nav/routes/router 关键词的文件
+    3. 提取路由路径和组件引用信息
 
     Raises:
         ToolError: 项目路径不存在 / 不是目录
@@ -330,16 +424,43 @@ def scan_menu_structure(project_path: str) -> str:
             if any(kw in filename_lower for kw in menu_keywords):
                 menu_files.append(file)
 
+    common_router_paths = [
+        root / "src" / "router" / "index.js",
+        root / "src" / "router" / "index.ts",
+        root / "src" / "router.js",
+        root / "src" / "router.ts",
+        root / "src" / "main.js",
+        root / "src" / "main.ts",
+        root / "router" / "index.js",
+        root / "router" / "index.ts",
+    ]
+    for router_file in common_router_paths:
+        if router_file.exists() and router_file.is_file() and router_file not in menu_files:
+            menu_files.append(router_file)
+
     menu_info = {
+        "framework": "unknown",
+        "router": {
+            "exists": False,
+            "files": [],
+            "dynamic": False,
+        },
+        "menu": {
+            "type": "component",
+            "files": [],
+        },
         "menu_files": [],
         "extracted_routes": [],
         "route_file_paths": [],
         "menu_component_paths": [],
+        "entry_points": [],
     }
 
     for file in sorted(menu_files):
         rel_path = str(file.relative_to(root)).replace("\\", "/")
         is_menu_comp = any(kw in rel_path.lower() for kw in ["menu", "sidebar", "nav"])
+        is_router = any(kw in rel_path.lower() for kw in ["router", "routes"])
+        is_entry = rel_path in ["src/main.js", "src/main.ts", "main.js", "main.ts"]
 
         try:
             content = file.read_text(encoding="utf-8", errors="ignore")
@@ -347,23 +468,47 @@ def scan_menu_structure(project_path: str) -> str:
             continue
 
         routes = _extract_routes_from_content(content)
+        has_dynamic_routes = any(keyword in content.lower() for keyword in ["addroute", "dynamic", "async"])
 
         entry = {
             "file": str(file),
             "relative_path": rel_path,
-            "type": "menu_component" if is_menu_comp else "route_config",
+            "type": "menu_component" if is_menu_comp else ("entry_point" if is_entry else "route_config"),
             "extracted_routes": routes,
+            "has_dynamic_routes": has_dynamic_routes,
         }
 
         if is_menu_comp:
             menu_info["menu_component_paths"].append(rel_path)
+            menu_info["menu"]["files"].append(rel_path)
+        elif is_entry:
+            menu_info["entry_points"].append(rel_path)
         else:
             menu_info["route_file_paths"].append(rel_path)
+            menu_info["router"]["files"].append(rel_path)
+            menu_info["router"]["exists"] = True
+
+        if has_dynamic_routes:
+            menu_info["router"]["dynamic"] = True
 
         menu_info["menu_files"].append(entry)
         menu_info["extracted_routes"].extend(routes)
 
     menu_info["extracted_routes"] = sorted(set(menu_info["extracted_routes"]))
+
+    if (root / "package.json").exists():
+        try:
+            pkg_content = (root / "package.json").read_text(encoding="utf-8", errors="ignore")
+            pkg_data = json.loads(pkg_content)
+            deps = {**(pkg_data.get("dependencies", {})), **(pkg_data.get("devDependencies", {}))}
+            if "vue" in deps:
+                menu_info["framework"] = "vue"
+            elif "react" in deps:
+                menu_info["framework"] = "react"
+            elif "angular" in deps:
+                menu_info["framework"] = "angular"
+        except (json.JSONDecodeError, OSError):
+            pass
 
     return json.dumps(menu_info, ensure_ascii=False, indent=2)
 
@@ -465,7 +610,25 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取文件内容。支持绝对路径（如 D:/projects/xxx/src/App.vue，用于读取用户项目文件）和 workspace 相对路径（如 skill/hello.md）。当用户要求查看文件内容、分析代码时，必须使用此工具获取真实内容，禁止猜测文件内容",
+            "description": """读取文件内容。
+
+适合场景：
+- 用户要求查看文件内容、分析代码
+- 需要精读某个文件的具体实现
+
+不适合场景：
+- 查看目录结构（应使用 list_dir）
+- 搜索代码（应使用 search_file）
+
+耗时：低
+
+路径规则：
+- 绝对路径：用于读取用户项目文件，如 'D:/projects/xxx/src/App.vue'
+- 相对路径：用于 workspace 内操作，如 'skill/hello.md'
+
+重要规则：
+- 必须使用此工具获取真实内容，禁止猜测文件内容
+- 大文件建议设置 max_size 限制，避免内存溢出""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -487,7 +650,28 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "list_dir",
-            "description": "列出目录内容，返回真实的文件系统结构。支持绝对路径（如 D:/projects/xxx，用于扫描用户项目）和 workspace 相对路径。当用户要求扫描项目、查看目录结构时，必须使用此工具获取真实结果，禁止猜测或推断目录结构",
+            "description": """列出目录内容，返回真实的文件系统结构。
+
+适合场景：
+- 用户要求扫描项目、查看目录结构
+- 需要了解项目的目录组织方式
+- 分析项目必须先调用此工具获取基础结构
+
+不适合场景：
+- 读取文件内容（应使用 read_file）
+- 深度扫描项目结构（应使用 project_discover 或 scan_project）
+
+耗时：低到中（视目录大小而定）
+
+路径规则：
+- 绝对路径：用于扫描用户项目，如 'D:/projects/xxx'
+- 相对路径：用于 workspace 内操作，如 'skill'
+- 留空：workspace 根目录
+
+重要规则：
+- 必须使用此工具获取真实结果，禁止猜测或推断目录结构
+- 建议 max_depth 设置为 1-3 层，过深会导致结果过大
+- 分析项目流程：list_dir(root, max_depth=5) → 判断技术栈 → 再决定是否深入""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -514,7 +698,28 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "search_file",
-            "description": "搜索项目源码内容，返回匹配行号和上下文代码（推荐用于定位业务页面）。项目模式：传 keyword + root_path 搜索指定项目目录。支持逗号分隔的多关键词（OR逻辑），可用 file_extensions 过滤文件类型。这是定位需修改代码最精准的方式——直接用需求文档中的字段名或业务术语作为 keyword 搜索源码",
+            "description": """搜索项目源码内容，返回匹配行号和上下文代码。
+
+适合场景：
+- 定位具体业务代码（最精准的方式）
+- 根据需求文档中的字段名或业务术语搜索源码
+- 查找特定功能的实现位置
+
+不适合场景：
+- 查看目录结构（应使用 list_dir）
+- 快速了解技术栈（应使用 project_discover）
+
+耗时：中到高（视项目大小和搜索范围而定）
+
+搜索模式：
+- 项目模式（推荐）：传 keyword + root_path 搜索指定项目目录
+- workspace 模式：只传 query，在 workspace 内搜索
+
+重要规则：
+- 使用需求文档中的字段名、业务术语、组件名作为 keyword
+- 支持逗号分隔多关键词（OR逻辑），如 '研究状态,followStatus'
+- 可用 file_extensions 过滤文件类型，如 'vue,js,ts'
+- 默认只搜索源码文件，排除 .md/.json/.txt 等非源码文件""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -554,7 +759,22 @@ tool_definitions = [
         "type": "function",
         "function": {
             "name": "scan_menu_structure",
-            "description": "扫描项目中的菜单组件和路由配置文件，提取其中定义的页面路径。当用户要求分析项目结构、查找业务页面时，必须先调用此工具获取菜单和路由信息，这是定位真实页面路径的最准确方法",
+            "description": """扫描项目中的菜单组件和路由配置文件，提取其中定义的页面路径。
+
+适合场景：
+- 用户要求分析项目结构、查找业务页面
+- 需要获取项目的路由配置和页面映射关系
+
+不适合场景：
+- 读取具体文件内容（应使用 read_file）
+- 搜索特定代码（应使用 search_file）
+
+耗时：中
+
+重要规则：
+- 当用户要求分析项目结构、查找业务页面时，必须先调用此工具获取菜单和路由信息
+- 这是定位真实页面路径的最准确方法
+- 会自动搜索 menu/sidebar/nav/routes/router 相关文件""",
             "parameters": {
                 "type": "object",
                 "properties": {

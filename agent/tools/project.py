@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from app.config import WORKSPACE
+from app.services.code_understanding_service import CodeUnderstandingService
 from agent.exceptions import ToolError, ResourceNotFoundError
 
 
@@ -47,6 +48,96 @@ def get_project_info(name: str) -> str:
         raise ResourceNotFoundError("项目", name, "project")
 
     return json.dumps(project, ensure_ascii=False, indent=2)
+
+
+# ─── 轻量级项目发现 ───
+
+def project_discover(project_path: str = "", name: str = "") -> str:
+    """轻量级项目发现 — 快速识别项目技术栈和目录结构
+
+    仅读取 package.json 和根目录内容，不做深度文件扫描，耗时 < 1秒。
+    返回项目框架、构建工具、包管理器、目录结构等基础信息。
+
+    适合:
+    - 用户第一次介绍项目时快速了解技术栈
+    - 判断项目类型（Vue/React/等）
+    - 获取项目入口和主要目录
+
+    不适合:
+    - 查找具体业务代码
+    - 深度分析路由/组件/API
+
+    Raises:
+        ToolError: 项目路径不存在 / 不是目录
+    """
+    from app.services.project_registry_service import _normalize_path, _package_json, _detect_framework, _detect_build_tool, _detect_store_type, _detect_package_manager, _guess_dev_command
+
+    try:
+        if project_path:
+            root = _normalize_path(project_path)
+        elif name:
+            from app.services.project_registry_service import get_registered_project_item
+            item = get_registered_project_item(name)
+            if not item:
+                raise ToolError(f"项目 '{name}' 未注册，请使用 project_path 参数传入项目绝对路径", "project_discover")
+            root = _normalize_path(item.root_path)
+        else:
+            raise ToolError("请提供 project_path（项目绝对路径）或 name（已注册项目名）", "project_discover")
+
+        if not root.exists():
+            raise ToolError(f"项目路径不存在: {root}", "project_discover")
+        if not root.is_dir():
+            raise ToolError(f"不是目录: {root}", "project_discover")
+
+        package_data = _package_json(root)
+        if not package_data:
+            return json.dumps({
+                "status": "warning",
+                "message": "未找到 package.json，无法识别技术栈",
+                "path": str(root),
+            }, ensure_ascii=False, indent=2)
+
+        framework = _detect_framework(package_data)
+        build_tool = _detect_build_tool(root, package_data)
+        store_type = _detect_store_type(package_data)
+        package_manager = _detect_package_manager(root)
+        dev_command = _guess_dev_command(package_data, package_manager)
+
+        dirs = []
+        src_dir = "src" if (root / "src").exists() else ""
+        if src_dir:
+            try:
+                for child in sorted((root / "src").iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+                    if child.is_dir():
+                        dirs.append(f"src/{child.name}")
+            except PermissionError:
+                pass
+
+        config_files = []
+        for config in ["vite.config.ts", "vite.config.js", "webpack.config.js", "vue.config.js", ".umirc.ts", ".umirc.js", "rsbuild.config.ts", "next.config.js", "nuxt.config.ts"]:
+            if (root / config).exists():
+                config_files.append(config)
+
+        discovery = {
+            "project_name": root.name,
+            "root_path": str(root),
+            "framework": framework,
+            "build_tool": build_tool,
+            "package_manager": package_manager,
+            "dev_command": dev_command,
+            "store_type": store_type,
+            "src_dir": src_dir,
+            "dirs": dirs,
+            "config_files": config_files,
+            "dependencies_count": len(package_data.get("dependencies", {})),
+            "dev_dependencies_count": len(package_data.get("devDependencies", {})),
+        }
+
+        return json.dumps(discovery, ensure_ascii=False, indent=2)
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(f"发现失败: {e}", "project_discover")
 
 
 # ─── 深度项目扫描 ───
@@ -130,20 +221,39 @@ def scan_project(name: str = "", project_path: str = "", full_scan: bool = False
 
             max_items = 10000 if full_scan else 200
             structure = _build_scan_structure(root, item, max_items_per_section=max_items)
-            _write_project_files(project_name, structure)
+
+            code_understanding_service = CodeUnderstandingService()
+            knowledge = code_understanding_service.build_project_knowledge(
+                str(root), structure
+            )
+
+            _write_project_files(project_name, structure, knowledge)
+
+            from app.services.project_registry_service import _load_items, _save_items
+            existing_items = _load_items()
+            if not any(existing.name == project_name for existing in existing_items):
+                existing_items.append(item)
+                _save_items(existing_items)
+
+            page_count = len(knowledge.get("pages", []))
+            comp_count = len(knowledge.get("components", []))
+            api_count = len(knowledge.get("api_modules", []))
+
+            business_summary = code_understanding_service.summarize_business_capabilities(knowledge)
 
             summary = (
                 f"项目 {project_name} 扫描完成:\n"
                 f"  - 路径: {structure['root_path']}\n"
                 f"  - 框架: {structure['framework']}\n"
                 f"  - 构建工具: {structure['build_tool']}\n"
-                f"  - 页面文件: {len(structure['pages'])} 个\n"
-                f"  - 组件文件: {len(structure['components'])} 个\n"
-                f"  - API 模块: {len(structure['api_modules'])} 个\n"
+                f"  - 页面文件: {page_count} 个\n"
+                f"  - 组件文件: {comp_count} 个\n"
+                f"  - API 模块: {api_count} 个\n"
                 f"  - 路由条目: {len(structure['router']['routes'])} 个\n"
                 f"  - UI 组件库: {', '.join(structure['ui_libraries']) or '未识别'}\n"
                 f"  - 状态管理: {structure['state']['type']}\n"
                 f"  - 扫描时间: {structure['scanned_at']}\n"
+                f"\n## 业务能力分析\n{business_summary}\n"
                 f"\n提示: 请使用 search_file(keyword='业务关键词', root_path='{structure['root_path']}') 搜索具体代码，无需读取生成的文档"
             )
             return summary
@@ -256,8 +366,63 @@ tool_definitions = [
     {
         "type": "function",
         "function": {
+            "name": "project_discover",
+            "description": """轻量级项目发现：快速识别项目技术栈和目录结构。
+
+适合场景：
+- 用户第一次介绍项目时快速了解技术栈
+- 判断项目类型（Vue2/Vue3/React/Next.js/Nuxt 等）
+- 获取项目入口和主要目录列表
+
+不适合场景：
+- 查找具体业务代码
+- 深度分析路由/组件/API
+
+耗时：低（< 1秒）
+
+返回：项目框架、构建工具、包管理器、src 子目录、配置文件列表""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_path": {
+                        "type": "string",
+                        "description": "项目根目录的绝对路径（推荐用法，无需注册即可发现），如 '/Users/xxx/projects/my-project'"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "已注册的项目名称（仅在项目已通过 API 注册时使用）"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "scan_project",
-            "description": "深度扫描项目代码结构，自动识别路由、页面、组件、API 模块、状态管理等。支持两种方式：1) 传 project_path（绝对路径）直接扫描任意项目目录（推荐）；2) 传 name（已注册项目名）扫描注册过的项目。扫描结果写入 workspace/projects/ 目录",
+            "description": """深度扫描项目代码结构：自动识别路由、页面、组件、API 模块、状态管理等。
+
+适合场景：
+- 需要深入了解项目整体架构时使用
+- 已通过 project_discover 了解技术栈后，需要详细结构信息
+
+不适合场景：
+- 用户第一次介绍项目时直接使用（应先用 project_discover）
+- 查找具体业务代码（应使用 search_file）
+
+耗时：中到高（视项目大小而定，大型项目可能需要较长时间）
+
+重要规则：
+- 禁止直接调用 scan_project(full_scan=true)
+- 分析项目必须先调用 project_discover 或 list_dir 获取基础信息
+- 如需深度扫描，保持 full_scan=false（默认）即可，避免扫描过多文件
+
+支持两种方式：
+1) 传 project_path（绝对路径）直接扫描任意项目目录（推荐）
+2) 传 name（已注册项目名）扫描注册过的项目
+
+扫描结果写入 workspace/projects/ 目录""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -271,7 +436,7 @@ tool_definitions = [
                     },
                     "full_scan": {
                         "type": "boolean",
-                        "description": "是否全量扫描（不限数量），默认 false",
+                        "description": "是否全量扫描（不限数量），默认 false。**禁止使用 true**，会导致扫描过慢甚至超时",
                         "default": False
                     }
                 },
@@ -319,6 +484,10 @@ tool_definitions = [
 tool_handlers = {
     "list_registered_projects": lambda args: list_registered_projects(),
     "get_project_info": lambda args: get_project_info(args.get("name", "")),
+    "project_discover": lambda args: project_discover(
+        project_path=args.get("project_path", "") or args.get("path", ""),
+        name=args.get("name", "")
+    ),
     "scan_project": lambda args: scan_project(
         name=args.get("name", ""),
         project_path=args.get("project_path", "") or args.get("path", ""),

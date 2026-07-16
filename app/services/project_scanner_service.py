@@ -9,6 +9,7 @@ from app.services.project_registry_service import (
     get_registered_project_item,
     update_registered_project,
 )
+from app.services.code_understanding_service import CodeUnderstandingService
 
 
 PROJECTS_DOCS_DIR = WORKSPACE / "projects"
@@ -251,7 +252,149 @@ def _build_scan_structure(project_root: Path, registry_item, max_items_per_secti
     }
 
 
-def _write_project_files(project_name: str, structure: dict):
+def _extract_vue_components(content: str) -> list[str]:
+    components = []
+    pattern = r"<(\w+)[^>]*>"
+    matches = re.findall(pattern, content)
+    for comp in matches:
+        if comp.startswith("el-") or comp.startswith("a-") or comp.startswith("van-"):
+            if comp not in components:
+                components.append(comp)
+    return components
+
+
+def _extract_vue_methods(content: str) -> list[str]:
+    methods = []
+    pattern = r"(?:methods\s*:\s*)?\{([^}]*)\}"
+    match = re.search(pattern, content, re.DOTALL)
+    if match:
+        func_pattern = r"(\w+)\s*\(\s*[^)]*\s*\)\s*[:=]"
+        methods = re.findall(func_pattern, match.group(1))
+    return methods
+
+
+def _extract_api_calls(content: str) -> list[str]:
+    calls = []
+    patterns = [
+        r"(?:this\.)?(\w+)\s*\(\s*['\"]([^'\"]+)['\"]",
+        r"axios\.(get|post|put|delete)\s*\(\s*['\"]([^'\"]+)['\"]",
+        r"\$http\.(get|post|put|delete)\s*\(\s*['\"]([^'\"]+)['\"]",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, content)
+        for method, url in matches:
+            if url.startswith("/"):
+                calls.append(url)
+            elif method:
+                calls.append(method)
+    return list(set(calls))
+
+
+def _extract_page_title(content: str) -> str:
+    patterns = [
+        r"<title[^>]*>([^<]+)</title>",
+        r"document\.title\s*=\s*['\"]([^'\"]+)['\"]",
+        r"this\.\$route\.meta\.title",
+        r"meta:\s*\{[^}]*title\s*:\s*['\"]([^'\"]+)['\"]",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _extract_api_info(content: str, file_path: str) -> list[dict]:
+    apis = []
+    patterns = [
+        r"export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*\(\s*([^)]*)\s*\)\s*\{([^}]*)\}",
+        r"export\s+const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s+)?function\s*\(\s*([^)]*)\s*\)\s*\{([^}]*)\}",
+        r"export\s+const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>\s*\{([^}]*)\}",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, content, re.DOTALL)
+        for name, params, body in matches:
+            url_pattern = r"url\s*[=:]\s*['\"]([^'\"]+)['\"]"
+            url_match = re.search(url_pattern, body)
+            url = url_match.group(1) if url_match else ""
+            
+            method_pattern = r"(get|post|put|delete|patch)\s*\("
+            method_match = re.search(method_pattern, body)
+            method = method_match.group(1).upper() if method_match else "GET"
+            
+            apis.append({
+                "name": name,
+                "url": url,
+                "method": method,
+                "params": params.strip(),
+                "file": file_path,
+            })
+    return apis
+
+
+def build_code_index(project_root: Path, structure: dict) -> dict:
+    """构建代码索引 — 读取文件内容并提取关键信息"""
+    code_index = {
+        "project": structure.get("project", ""),
+        "root_path": str(project_root),
+        "pages": [],
+        "components": [],
+        "api_modules": [],
+        "router_mapping": [],
+    }
+
+    for page_file in structure.get("pages", []):
+        content = _read_text_if_exists(project_root, page_file)
+        if not content:
+            continue
+        
+        code_index["pages"].append({
+            "file": page_file,
+            "content": content,
+            "template_components": _extract_vue_components(content),
+            "methods": _extract_vue_methods(content),
+            "api_calls": _extract_api_calls(content),
+            "title": _extract_page_title(content),
+        })
+
+    for comp_file in structure.get("components", []):
+        content = _read_text_if_exists(project_root, comp_file)
+        if not content:
+            continue
+        
+        code_index["components"].append({
+            "file": comp_file,
+            "content": content,
+            "template_components": _extract_vue_components(content),
+            "methods": _extract_vue_methods(content),
+            "api_calls": _extract_api_calls(content),
+        })
+
+    for api_module in structure.get("api_modules", []):
+        api_file = api_module.get("path", "")
+        content = _read_text_if_exists(project_root, api_file)
+        if not content:
+            continue
+        
+        code_index["api_modules"].append({
+            "file": api_file,
+            "content": content,
+            "symbols": api_module.get("symbols", []),
+            "apis": _extract_api_info(content, api_file),
+        })
+
+    for route in structure.get("router", {}).get("routes", []):
+        code_index["router_mapping"].append({
+            "path": route.get("path", ""),
+            "name": route.get("name", ""),
+            "component": route.get("component", ""),
+            "file": route.get("file", ""),
+        })
+
+    return code_index
+
+
+def _write_project_files(project_name: str, structure: dict, knowledge: dict = None):
     project_dir = PROJECTS_DOCS_DIR / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
     PROJECT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -261,6 +404,11 @@ def _write_project_files(project_name: str, structure: dict):
     structure_json = json.dumps(structure, ensure_ascii=False, indent=2)
     structure_path.write_text(structure_json, encoding="utf-8")
     cache_path.write_text(structure_json, encoding="utf-8")
+
+    if knowledge:
+        knowledge_path = project_dir / "knowledge.json"
+        knowledge_json = json.dumps(knowledge, ensure_ascii=False, indent=2)
+        knowledge_path.write_text(knowledge_json, encoding="utf-8")
 
     overview_lines = [
         f"# {project_name} 项目概览",
@@ -331,6 +479,10 @@ def _write_project_files(project_name: str, structure: dict):
     (project_dir / "api.md").write_text("\n".join(api_lines) + "\n", encoding="utf-8")
     (project_dir / "components.md").write_text("\n".join(component_lines) + "\n", encoding="utf-8")
 
+    if knowledge:
+        business_summary = CodeUnderstandingService().summarize_business_capabilities(knowledge)
+        (project_dir / "business_capabilities.md").write_text(business_summary + "\n", encoding="utf-8")
+
 
 def scan_registered_project(name: str, full_scan: bool = False) -> dict:
     item = get_registered_project_item(name)
@@ -349,7 +501,19 @@ def scan_registered_project(name: str, full_scan: bool = False) -> dict:
     try:
         max_items = MAX_ITEMS_PER_SECTION if not full_scan else 10000
         structure = _build_scan_structure(project_root, item, max_items_per_section=max_items)
-        _write_project_files(name, structure)
+
+        code_index = build_code_index(project_root, structure)
+
+        code_understanding_service = CodeUnderstandingService()
+        knowledge = code_understanding_service.build_project_knowledge(
+            str(project_root), structure, code_index
+        )
+
+        _write_project_files(name, structure, knowledge)
+
+        page_count = len(knowledge.get("pages", []))
+        comp_count = len(knowledge.get("components", []))
+        api_count = len(knowledge.get("api_modules", []))
 
         update_registered_project(
             name,
@@ -361,13 +525,12 @@ def scan_registered_project(name: str, full_scan: bool = False) -> dict:
                 component_dirs=structure["component_dirs"],
                 page_dirs=structure["page_dirs"],
                 module_summary=(
-                    f"扫描到 {len(structure['pages'])} 个页面文件、"
-                    f"{len(structure['components'])} 个组件文件、"
-                    f"{len(structure['api_modules'])} 个 API 模块"
+                    f"扫描到 {page_count} 个页面文件、{comp_count} 个组件文件、"
+                    f"{api_count} 个 API 模块，已生成业务能力知识"
                 ),
             ),
         )
-        return structure
+        return {**structure, "knowledge": knowledge}
     except Exception:
         update_registered_project(
             name,
