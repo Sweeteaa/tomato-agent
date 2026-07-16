@@ -28,6 +28,59 @@ from app.config import MODEL_NAME, TEMPERATURE_PLANNING, MAX_STEPS
 logger = logging.getLogger("gt_agent.core.critic")
 
 
+def _build_summary_prompt(goal: str, trajectory: list, suggestion: str) -> str:
+    """构建总结回答的提示词"""
+    if trajectory:
+        traj_lines = []
+        for i, step in enumerate(trajectory):
+            thought = step.get("thought", "")
+            action = step.get("action", {})
+            obs = step.get("observation", {})
+            obs_text = obs.get("findings", "") or str(obs.get("result", ""))
+            if len(obs_text) > 500:
+                obs_text = obs_text[:500] + "...[已截断]"
+            status = obs.get("status", "unknown")
+            traj_lines.append(
+                f"  {i+1}. [{status}] 思考: {thought} → 动作: {json.dumps(action, ensure_ascii=False)} → 观察: {obs_text}"
+            )
+        traj_str = "\n".join(traj_lines)
+    else:
+        traj_str = "  （暂无执行记录）"
+
+    return f"""你是 GT Agent 的总结器。根据用户目标和执行轨迹，生成简洁专业的最终回答。
+
+## 用户目标
+{goal}
+
+## 执行轨迹
+{traj_str}
+
+## 评判建议
+{suggestion}
+
+## 输出要求
+- 使用自然语言总结，不要输出 JSON 格式
+- 总结已获取的信息和结论
+- 如果有未完成的部分，简要说明
+- 语言清晰、专业、易懂"""
+
+
+async def _generate_summary(client, prompt: str) -> str:
+    """调用 LLM 生成总结回答"""
+    messages = [
+        {"role": "system", "content": "你是 GT Agent 的总结器，生成简洁专业的最终回答"},
+        {"role": "user", "content": prompt},
+    ]
+
+    completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=TEMPERATURE_PLANNING,
+    )
+
+    return completion.choices[0].message.content or ""
+
+
 def build_critic_prompt(
     goal: str,
     trajectory: list,
@@ -206,11 +259,16 @@ async def critique(state: AgentState, client, prompt_builder=None) -> dict:
 
     if not should_continue:
         logger.info("critic: 判定完成 (iter=%d, score=%d): %s", iteration, score, suggestion)
+        
+        summary_prompt = _build_summary_prompt(goal, trajectory, suggestion)
+        summary_answer = await _generate_summary(client, summary_prompt)
+        
         return {
             "finished": True,
             "hypothesis": hypothesis,
             "trajectory": trajectory,
             "iteration": iteration + 1,
+            "answer": summary_answer,
         }
     else:
         logger.info("critic: 判定继续 (iter=%d, score=%d, issues=%s): %s",
