@@ -27,7 +27,7 @@ class ProjectWorkflow:
             ctx.project_path = provided_project_path
             ctx.query = remaining_query
         else:
-            path_match = re.search(r'(D:/\S+|/[a-zA-Z]/\S+|[a-zA-Z]:\\\S+)', ctx.query)
+            path_match = re.search(r'(D:/\S+|/Users/\S+|/home/\S+|/[a-zA-Z][a-zA-Z0-9_-]*/\S+|[a-zA-Z]:\\\S+|~/\S+)', ctx.query)
             if path_match:
                 provided_project_path = path_match.group(1)
                 provided_project_name = Path(provided_project_path).name

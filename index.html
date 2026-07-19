@@ -81,14 +81,14 @@
             <p class="text-white/80 text-lg">本地智能开发助手 · 知识即文件</p>
         </header>
 
-        <div class="flex justify-center gap-4 mb-6 flex-wrap hide-on-fullscreen">
+        <!-- <div class="flex justify-center gap-4 mb-6 flex-wrap hide-on-fullscreen">
             <div class="bg-white/20 px-4 py-2 rounded-full text-white text-sm" id="health-status">
                 <i class="fas fa-heartbeat"></i> 检查中...
             </div>
             <button onclick="refreshAll()" class="bg-white/20 hover:bg-white/30 px-4 py-2 rounded-full text-white text-sm cursor-pointer transition-all">
                 <i class="fas fa-sync-alt"></i> 刷新
             </button>
-        </div>
+        </div> -->
 
         <div id="chat-container" class="bg-white rounded-2xl p-5 shadow-lg mb-6 flex flex-col" ondragover="handleChatDragOver(event)" ondragleave="handleChatDragLeave(event)" ondrop="handleChatDrop(event)">
             <div id="fullscreen-sidebar" class="hidden w-72 bg-gray-50 rounded-xl p-4 mr-4 overflow-hidden flex flex-col">
@@ -152,7 +152,7 @@
             </div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 mb-6 hide-on-fullscreen">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-6 hide-on-fullscreen">
             <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
                 <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
                     <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-400 to-indigo-600 flex items-center justify-center">
@@ -168,6 +168,23 @@
                 </div>
             </div>
 
+            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
+                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+                        <i class="fas fa-folder-open text-white"></i>
+                    </div>
+                    <div>
+                        <div class="font-semibold text-gray-800">Projects</div>
+                        <div class="text-xs text-gray-500" id="proj-count">0 个项目</div>
+                    </div>
+                </div>
+                <div id="proj-list" class="max-h-64 overflow-y-auto">
+                    <div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-folder-open text-2xl mb-1 opacity-50 block"></i>暂无项目</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6 hide-on-fullscreen">
             <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
                 <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
                     <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center">
@@ -187,38 +204,6 @@
                     <!-- 气泡布局：均匀换行、固定gap间距，所有气泡完整展示无重叠遮挡 -->
                     <div id="bubble-wrap" class="hidden w-full h-full flex flex-wrap items-center justify-center gap-1 content-center">
                     </div>
-                </div>
-            </div>
-
-            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
-                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
-                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-400 to-red-500 flex items-center justify-center">
-                        <i class="fas fa-clock text-white"></i>
-                    </div>
-                    <div>
-                        <div class="font-semibold text-gray-800">待办任务</div>
-                        <div class="text-xs text-gray-500" id="task-count">0 个待办</div>
-                    </div>
-                </div>
-                <div id="task-list" class="max-h-48 overflow-y-auto">
-                    <div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-check-circle text-2xl mb-1 opacity-50 block"></i>暂无待办</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-6 hide-on-fullscreen">
-            <div class="bg-white rounded-2xl p-5 shadow-lg hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
-                <div class="flex items-center gap-3 mb-4 pb-3 border-b-2 border-gray-100">
-                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
-                        <i class="fas fa-folder-open text-white"></i>
-                    </div>
-                    <div>
-                        <div class="font-semibold text-gray-800">Projects</div>
-                        <div class="text-xs text-gray-500" id="proj-count">0 个项目</div>
-                    </div>
-                </div>
-                <div id="proj-list" class="max-h-64 overflow-y-auto">
-                    <div class="text-center py-4 text-gray-400 text-sm"><i class="fas fa-folder-open text-2xl mb-1 opacity-50 block"></i>暂无项目</div>
                 </div>
             </div>
 
@@ -444,6 +429,7 @@
                 const data = await res.json();
                 currentConvId = data.id;
                 selectedProjectPath = '';
+                thinkingContainer = null;
                 document.getElementById('chat-messages').innerHTML = `
                     <div class="text-center text-gray-400 text-sm py-4">
                         <i class="fas fa-comments text-3xl mb-2 opacity-50 block"></i>
@@ -709,71 +695,97 @@
             container.scrollTop = container.scrollHeight;
         }
 
-        function addThinkingProcess(planSteps, trace) {
+        /* 极简风格思考过程渲染 —— 每步 = icon + 文字卡片 */
+        let thinkingContainer = null;  // 当前对话的思考过程容器（流式追加用）
+        let thinkingStepCount = 0;     // 当前累计步骤数
+
+        function addThinkingProcess(planSteps, trace, append) {
             const container = document.getElementById('chat-messages');
-            if (container.innerHTML.includes('fas fa-comments')) {
-                container.innerHTML = '';
+
+            /* 首次调用或无 append 时创建新容器 */
+            if (!append || !thinkingContainer) {
+                if (container.innerHTML.includes('fas fa-comments')) {
+                    container.innerHTML = '';
+                }
+                thinkingContainer = document.createElement('div');
+                thinkingContainer.className = 'flex flex-col mb-2 space-y-1.5';
+                thinkingContainer.dataset.totalSteps = '0';
+                container.appendChild(thinkingContainer);
+                thinkingStepCount = 0;
             }
-            
-            const msgDiv = document.createElement('div');
-            msgDiv.className = 'flex justify-start mb-4';
-            
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'max-w-[90%] px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 rounded-tl-none';
-            
-            const header = document.createElement('div');
-            header.className = 'flex items-center gap-2 mb-3 pb-2 border-b border-amber-200';
-            header.innerHTML = `<i class="fas fa-brain text-amber-500"></i><span class="text-xs font-semibold text-amber-700">Agent 思考过程</span><span class="ml-auto text-xs text-amber-600">计划 ${planSteps} 步</span>`;
-            contentDiv.appendChild(header);
-            
-            const timeline = document.createElement('div');
-            timeline.className = 'space-y-3';
-            
-            trace.forEach((step, index) => {
-                const stepDiv = document.createElement('div');
-                stepDiv.className = 'relative pl-6';
-                
-                const dot = document.createElement('div');
-                dot.className = `absolute left-0 top-1 w-3 h-3 rounded-full ${step.status === 'success' ? 'bg-green-500' : 'bg-red-500'}`;
-                stepDiv.appendChild(dot);
-                
-                const line = document.createElement('div');
-                line.className = 'absolute left-1.5 top-4 w-0.5 h-full bg-amber-200';
-                stepDiv.appendChild(line);
-                
-                const stepContent = document.createElement('div');
-                
-                const stepHeader = document.createElement('div');
-                stepHeader.className = 'flex items-center gap-2 mb-1';
-                stepHeader.innerHTML = `<span class="text-xs font-semibold text-amber-600">步骤 ${index + 1}</span><span class="text-xs text-gray-500">${step.step}</span>`;
-                stepContent.appendChild(stepHeader);
-                
-                const toolInfo = document.createElement('div');
-                toolInfo.className = 'flex items-center gap-2 text-xs mb-1';
-                const toolBadge = `<span class="px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded font-medium">${step.tool}</span>`;
-                const argsStr = step.args ? `参数: ${JSON.stringify(step.args)}` : '';
-                toolInfo.innerHTML = `${toolBadge}${argsStr}`;
-                stepContent.appendChild(toolInfo);
-                
-                const resultDiv = document.createElement('div');
-                resultDiv.className = `text-sm ${step.status === 'success' ? 'text-green-700' : 'text-red-600'}`;
-                resultDiv.textContent = step.result;
-                stepContent.appendChild(resultDiv);
-                
-                stepDiv.appendChild(stepContent);
-                timeline.appendChild(stepDiv);
+
+            trace.forEach(step => {
+                thinkingStepCount++;
+                thinkingContainer.dataset.totalSteps = thinkingStepCount;
+
+                const card = document.createElement('div');
+                card.className = 'max-w-[90%] px-3.5 py-2 rounded-xl bg-gray-50 border border-gray-100 flex items-center gap-2.5';
+
+                /* 根据类型选图标 */
+                let iconClass = 'fa-circle text-gray-400';
+                let stepType = step.type || '';
+                if (!stepType) {
+                    if (step.thinking || step.thought) stepType = 'thinking';
+                    else if (step.tool) stepType = 'tool';
+                    else if (step.result !== undefined && step.result !== '') stepType = 'result';
+                    else stepType = 'task';
+                }
+
+                if (stepType === 'thinking') iconClass = 'fa-brain text-gray-400';
+                else if (stepType === 'tool') iconClass = 'fa-wrench text-blue-400';
+                else if (stepType === 'task') iconClass = 'fa-list-check text-amber-500';
+                else if (stepType === 'result') iconClass = 'fa-check-circle text-green-500';
+
+                /* 左侧图标 */
+                const icon = document.createElement('i');
+                icon.className = `fas ${iconClass} text-sm flex-shrink-0`;
+                card.appendChild(icon);
+
+                /* 右侧文字 */
+                const textSpan = document.createElement('span');
+                textSpan.className = 'text-sm text-gray-700';
+
+                /* 显示文字：优先 step，其次 thinking，其次 tool+result */
+                const displayText = step.thinking || step.thought || step.step || '';
+                if (displayText) {
+                    textSpan.textContent = displayText;
+                } else if (step.tool) {
+                    textSpan.textContent = step.tool;
+                } else if (step.result) {
+                    const truncated = step.result.length > 80 ? step.result.substring(0, 80) + '...' : step.result;
+                    textSpan.textContent = truncated;
+                } else {
+                    textSpan.textContent = '步骤 ' + thinkingStepCount;
+                }
+                card.appendChild(textSpan);
+
+                /* 可选：右侧小字（工具名 / 耗时） */
+                if (step.tool && !displayText) {
+                    const meta = document.createElement('span');
+                    meta.className = 'ml-auto text-xs text-gray-400 flex-shrink-0';
+                    meta.textContent = step.tool;
+                    card.appendChild(meta);
+                }
+                if (step.duration || step.time) {
+                    const meta = document.createElement('span');
+                    meta.className = 'ml-auto text-xs text-gray-400 flex-shrink-0';
+                    meta.textContent = step.duration || step.time;
+                    card.appendChild(meta);
+                }
+
+                thinkingContainer.appendChild(card);
             });
-            
-            if (trace.length === 0) {
-                const noTrace = document.createElement('div');
-                noTrace.className = 'text-center text-gray-400 text-xs py-2';
-                noTrace.textContent = '直接回答，无需工具操作';
-                timeline.appendChild(noTrace);
+
+            /* 更新步骤计数显示（在容器前插入/更新计数标签） */
+            let countLabel = thinkingContainer.parentElement.querySelector('.thinking-count-label');
+            if (!countLabel) {
+                countLabel = document.createElement('div');
+                countLabel.className = 'thinking-count-label flex items-center gap-1.5 text-xs text-gray-400 mb-1 ml-1';
+                countLabel.innerHTML = '<i class="fas fa-brain text-gray-300"></i><span></span>';
+                thinkingContainer.parentElement.insertBefore(countLabel, thinkingContainer);
             }
-            
-            contentDiv.appendChild(timeline);
-            msgDiv.appendChild(contentDiv);
-            container.appendChild(msgDiv);
+            countLabel.querySelector('span').textContent = `深度思考 · ${thinkingStepCount} 步`;
+
             container.scrollTop = container.scrollHeight;
         }
 
@@ -816,9 +828,11 @@
             let statusEl = null;
             let currentTrace = [];
             let currentPlanSteps = 0;
-            let assistantMsgWrap = null;   // 新增
-            let assistantHtmlBox = null;   // 新增
-            let fullMarkdownText = '';     // 新增
+            let assistantMsgWrap = null;
+            let assistantHtmlBox = null;
+            let fullMarkdownText = '';
+            let pendingToolStart = null;  // 缓存 tool_start 事件，等待 tool_end
+            thinkingContainer = null;     // 重置思考过程容器
             
             try {
                 const formData = new FormData();
@@ -901,61 +915,92 @@
                 }
                 
                 if (event.type === 'plan') {
-                    currentPlanSteps = event.plan_steps;
+                    const planData = event.plan || {};
+                    const steps = planData.steps || [];
+                    currentPlanSteps = steps.length;
                     currentTrace = [];
-                    
+                    thinkingContainer = null;  // 重置，创建新容器
+                                    
                     if (statusEl) statusEl.remove();
-                    
-                    const planDiv = document.createElement('div');
-                    planDiv.className = 'flex justify-start mb-4';
-                    planDiv.innerHTML = `
-                        <div class="max-w-[90%] px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 rounded-tl-none">
-                            <div class="flex items-center gap-2 mb-3 pb-2 border-b border-amber-200">
-                                <i class="fas fa-brain text-amber-500"></i>
-                                <span class="text-xs font-semibold text-amber-700">Agent 思考过程</span>
-                                <span class="ml-auto text-xs text-amber-600">计划 ${currentPlanSteps} 步</span>
-                            </div>
-                            <div class="space-y-2">
-                                ${event.steps.map((step, i) => `
-                                    <div class="flex items-center gap-2 text-sm">
-                                        <span class="w-5 h-5 flex items-center justify-center bg-amber-200 text-amber-700 rounded-full text-xs font-semibold">${i + 1}</span>
-                                        <span class="text-gray-700">${step.step}</span>
-                                        <span class="ml-auto px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded text-xs">${step.tool}</span>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </div>
-                    `;
-                    container.appendChild(planDiv);
-                    container.scrollTop = container.scrollHeight;
+                                    
+                    if (planData.requires_planning && steps.length > 0) {
+                        addThinkingProcess(currentPlanSteps, steps.map((s) => ({
+                            type: 'task',
+                            step: s.step || s.description || s,
+                            tool: s.tool || '',
+                            args: null,
+                            result: '',
+                            status: 'success',
+                        })), false);
+                    }
                 }
                 
+                if (event.type === 'thought') {
+                    if (statusEl) statusEl.remove();
+                    addThinkingProcess(1, [{
+                        type: 'thinking',
+                        thinking: event.content,
+                        step: '思考分析',
+                        tool: '',
+                        args: null,
+                        result: '',
+                        status: 'success',
+                    }], !!thinkingContainer);
+                }
+                
+                if (event.type === 'tool_start') {
+                    if (statusEl) statusEl.remove();
+                    pendingToolStart = {
+                        tool: event.tool,
+                        args: event.args,
+                        purpose: event.purpose || '',
+                    };
+                    addThinkingProcess(1, [{
+                        type: 'tool',
+                        step: event.purpose || `调用工具 ${event.tool}`,
+                        tool: event.tool,
+                        args: event.args,
+                        result: '执行中...',
+                        status: 'success',
+                    }], !!thinkingContainer);
+                }
+                
+                if (event.type === 'tool_end') {
+                    if (statusEl) statusEl.remove();
+                    const toolName = event.tool || (pendingToolStart ? pendingToolStart.tool : '');
+                    const toolArgs = pendingToolStart ? pendingToolStart.args : (event.args || {});
+                    const stepDesc = pendingToolStart ? pendingToolStart.purpose : '';
+                    pendingToolStart = null;
+                
+                    addThinkingProcess(1, [{
+                        type: 'tool',
+                        step: stepDesc || `调用工具 ${toolName}`,
+                        tool: toolName,
+                        args: toolArgs,
+                        result: event.result || '',
+                        status: event.status === 'success' || event.status === 'completed' ? 'success' : 'failed',
+                    }], true);
+                }
+                
+                if (event.type === 'plan_progress') {
+                    if (statusEl) {
+                        statusEl.querySelector('span:last-child').textContent = event.message;
+                    }
+                }
+                                
                 if (event.type === 'trace') {
                     currentTrace.push(event.step);
-                    
+                                    
                     if (statusEl) statusEl.remove();
-                    
-                    const traceDiv = document.createElement('div');
-                    traceDiv.className = 'flex justify-start mb-4';
-                    const statusColor = event.step.status === 'success' ? 'green' : 'red';
-                    const statusIcon = event.step.status === 'success' ? 'check-circle' : 'exclamation-circle';
-                    
-                    traceDiv.innerHTML = `
-                        <div class="max-w-[90%] px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 rounded-tl-none">
-                            <div class="flex items-center gap-2 mb-2">
-                                <i class="fas fa-${statusIcon} text-${statusColor}-500"></i>
-                                <span class="text-xs font-semibold text-${statusColor}-600">${event.step.status === 'success' ? '执行成功' : '执行失败'}</span>
-                                <span class="ml-auto text-xs text-gray-400">${event.step.tool}</span>
-                            </div>
-                            <div class="text-sm text-gray-700 mb-2">${event.step.step}</div>
-                            <div class="text-xs text-gray-500">
-                                ${event.step.args ? `<div>参数: ${JSON.stringify(event.step.args)}</div>` : ''}
-                                <div>结果: ${event.step.result}</div>
-                            </div>
-                        </div>
-                    `;
-                    container.appendChild(traceDiv);
-                    container.scrollTop = container.scrollHeight;
+                
+                    addThinkingProcess(1, [{
+                        type: event.step.tool ? 'tool' : 'result',
+                        step: event.step.step || '',
+                        tool: event.step.tool || '',
+                        args: event.step.args || null,
+                        result: event.step.result || '',
+                        status: event.step.status === 'success' ? 'success' : 'failed',
+                    }], true);
                 }
                 
                 if (event.type === 'token') {
@@ -1031,13 +1076,48 @@
                 
                 const container = document.getElementById('chat-messages');
                 container.innerHTML = '';
+                thinkingContainer = null;  // 重置思考过程容器
+                
+                const thinkingRecords = data.thinking_records || [];
+                let thinkingIdx = 0;
                 
                 data.messages.forEach(m => {
+                    // 跳过旧的"已执行工具操作"纯文本消息（已被思考过程替代）
+                    if (m.role === 'assistant' && typeof m.content === 'string' && m.content.startsWith('已执行工具操作:')) {
+                        return;
+                    }
+                
+                    // 在 assistant 回复前插入思考过程
+                    if (m.role === 'assistant' && thinkingIdx < thinkingRecords.length) {
+                        const record = thinkingRecords[thinkingIdx];
+                        thinkingIdx++;
+                        const planSteps = record.plan && record.plan.steps
+                            ? record.plan.steps.length
+                            : (record.trace ? record.trace.length : 0);
+                        const trace = (record.trace || []).map(t => ({
+                            type: t.thought ? 'thinking' : (t.action && t.action.tool ? 'tool' : 'result'),
+                            thinking: t.thought || '',
+                            step: t.action ? t.action.tool : '',
+                            tool: t.action ? t.action.tool : '',
+                            args: t.action ? (typeof t.action.args === 'string' ? tryParseJSON(t.action.args) : t.action.args) : null,
+                            result: t.observation ? t.observation.result : '',
+                            status: t.observation ? (t.observation.status === 'success' ? 'success' : 'failed') : 'success',
+                        }));
+                        if (trace.length > 0 || (record.plan && record.plan.requires_planning)) {
+                            addThinkingProcess(planSteps, trace, !!thinkingContainer);
+                        }
+                    }
+                
                     addMessage(m.role, m.content, false, m.role !== 'user');
                 });
                 
                 loadConversations();
             } catch (e) { console.error(e); }
+        }
+
+        function tryParseJSON(str) {
+            if (typeof str !== 'string') return str;
+            try { return JSON.parse(str); } catch { return str; }
         }
 
         async function showMemory(name) {

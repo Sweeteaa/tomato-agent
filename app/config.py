@@ -65,6 +65,10 @@ WORKSPACE_ID = os.getenv("WORKSPACE_ID", "ws-7xh0e417mx6yonyj")
 MODEL_NAME = "qwen-plus"
 VL_MODEL_NAME = os.getenv("VL_MODEL_NAME", "qwen-vl-plus")  # 图片识别专用视觉模型
 
+# ─── 推理模型（用于展示深度思考链，如 DeepSeek-R1）───
+REASONING_MODEL_NAME = os.getenv("REASONING_MODEL_NAME", "")
+USE_REASONING_MODEL = os.getenv("USE_REASONING_MODEL", "false").lower() in ("true", "1", "yes")
+
 # ─── 图片处理参数 ───
 MAX_IMAGES_PER_REQUEST = int(os.getenv("MAX_IMAGES_PER_REQUEST", "5"))   # 单次上传图片上限
 IMAGE_MAX_DIMENSION = int(os.getenv("IMAGE_MAX_DIMENSION", "1920"))      # 长边超过此值自动压缩

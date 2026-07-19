@@ -66,8 +66,19 @@ def save_conversation(conv_id: str, data: dict):
     return {"status": "saved", "file": file_path.name}
 
 
-def append_conversation(query: str, response: str, tool_executions: list = None, conv_id: str = None):
-    """追加对话记录。如果 conv_id 为空则自动创建新对话。"""
+def append_conversation(
+    query: str,
+    response: str,
+    tool_executions: list = None,
+    conv_id: str = None,
+    trace: list = None,
+    plan: dict = None,
+):
+    """追加对话记录。如果 conv_id 为空则自动创建新对话。
+
+    trace: 完整的执行轨迹（thinking/tool/result 步骤），用于历史回放
+    plan:  执行计划（steps + requires_planning 等）
+    """
     conv_dir = WORKSPACE / "conversations"
     conv_dir.mkdir(parents=True, exist_ok=True)
 
@@ -85,6 +96,16 @@ def append_conversation(query: str, response: str, tool_executions: list = None,
     if tool_executions:
         conv_data["messages"].append({"role": "assistant", "content": f"已执行工具操作: {json.dumps(tool_executions, ensure_ascii=False)}"})
     conv_data["messages"].append({"role": "assistant", "content": response})
+
+    # 保存结构化思考过程，用于历史回放
+    if trace or plan:
+        if "thinking_records" not in conv_data:
+            conv_data["thinking_records"] = []
+        conv_data["thinking_records"].append({
+            "plan": plan or {},
+            "trace": trace or [],
+        })
+
     file_path.write_text(json.dumps(conv_data, ensure_ascii=False, indent=2), encoding="utf-8")
     return conv_data
 

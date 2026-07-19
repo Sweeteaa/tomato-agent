@@ -9,7 +9,7 @@ from app.services.code_matcher_service import CodeMatcher
 from app.services.completion_analyzer_service import RequirementCompletionAnalyzer
 from app.services.plan_generator_service import PlanGenerator
 from app.services.task_service import create_execution_task
-from app.services.graph_service import _load_project_knowledge, _save_document_summary
+from app.workflows.utils import load_project_knowledge as _load_project_knowledge, save_document_summary as _save_document_summary
 
 
 class RequirementWorkflow:

@@ -16,6 +16,7 @@ class WorkflowContext:
     project_path: Optional[str] = None
     images: List[Dict[str, Any]] = field(default_factory=list)
     has_images: bool = False
+    files: List[Dict[str, Any]] = field(default_factory=list)  # 结构化文件块（text/image）
     pending_info: str = ""
     provided_project_path: Optional[str] = None
 
@@ -31,6 +32,7 @@ class WorkflowContext:
             "project_path": self.project_path,
             "images": self.images,
             "has_images": self.has_images,
+            "files": self.files,
             "pending_info": self.pending_info,
             "provided_project_path": self.provided_project_path,
         }

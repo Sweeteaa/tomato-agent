@@ -1,12 +1,13 @@
 """DocumentWorkflow - 文档和图片分析工作流"""
 
 import asyncio
-import re
-from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from app.workflows.context import WorkflowContext
-from app.workflows.utils import load_project_knowledge, save_document_summary, find_relevant_project, build_project_context
+from app.workflows.utils import (
+    load_project_knowledge, save_document_summary,
+    build_project_context, resolve_project_for_document,
+)
 from agent.workflows.project_scan_workflow import run_project_scan
 from app.services.requirement_analyzer_service import RequirementAnalyzer
 from app.services.code_matcher_service import CodeMatcher
@@ -37,61 +38,82 @@ ANTI_HALLUCINATION_RULES = """## 防幻觉规则（强制遵守）
 7. 如果工具没有返回结果，只能回答"无法访问本地文件系统，请检查路径是否正确或提供扫描权限"""
 
 
+def _build_query_with_files(ctx: WorkflowContext) -> str:
+    """将 ctx.files 中的文本块与原始 query 合并，用于纯文本需求分析。"""
+    text_parts = []
+    for f in ctx.files:
+        if isinstance(f, dict) and f.get("type") == "text" and "content" in f:
+            text_parts.append(f"【文件: {f.get('filename', 'unknown')}】\n{f['content']}\n")
+    if not text_parts:
+        return ctx.query
+    return f"{ctx.query}\n\n" + "\n".join(text_parts)
+
+
+def _collect_all_images(ctx: WorkflowContext) -> list[dict]:
+    """聚合直接上传的图片和从 Office 文档中提取的图片块。"""
+    images = list(ctx.images) if ctx.images else []
+    for f in ctx.files:
+        if isinstance(f, dict) and f.get("type") == "image" and "data" in f:
+            images.append(f)
+    return images
+
+
+def _data_uri_from_image(img: dict) -> str:
+    mime = img.get("mime", "image/jpeg")
+    data = img.get("data", "")
+    return f"data:{mime};base64,{data}"
+
+
 class DocumentWorkflow:
     @staticmethod
     async def run(ctx: WorkflowContext, registry=None):
         """执行文档分析工作流"""
-        use_vl = ctx.has_images
+        all_images = _collect_all_images(ctx)
+        use_vl = ctx.has_images or len(all_images) > 0
         active_model = VL_MODEL_NAME if use_vl else MODEL_NAME
         status_msg = "正在分析上传图片..." if use_vl else "正在分析上传文件..."
         yield {"type": "status", "message": status_msg}
 
+        # 合并用户 query 与文件中的文本块，用于后续文本分析
+        query_with_files = _build_query_with_files(ctx)
+
         image_hint = ""
-        if ctx.has_images and ctx.images:
-            image_names = ", ".join(img["filename"] for img in ctx.images)
-            image_hint = f"\n\n## 上传图片\n用户上传了 {len(ctx.images)} 张图片: {image_names}\n图片已附带在消息中，你可以直接看到图片内容。请结合图片和文本内容回答用户问题。"
+        if use_vl and all_images:
+            image_names = ", ".join(img.get("filename", f"img_{i + 1}") for i, img in enumerate(all_images))
+            doc_image_count = sum(1 for f in ctx.files if isinstance(f, dict) and f.get("type") == "image")
+            direct_image_count = len(ctx.images) if ctx.images else 0
+            image_hint = (
+                f"\n\n## 上传图片\n"
+                f"共 {len(all_images)} 张图片参与分析"
+                f"（直接上传 {direct_image_count} 张，从文档中提取 {doc_image_count} 张）: {image_names}\n"
+                f"图片已附带在消息中，请结合图片和文本内容回答用户问题。"
+            )
 
-        target_project_name = None
-        target_project_path = None
-        project_knowledge = None
+        # ── 解析目标项目（统一入口：query路径 → conv关联 → 文本匹配 → 最近扫描） ──
+        target_project_name, target_project_path, project_knowledge = \
+            resolve_project_for_document(ctx.query, ctx.conv_id, ctx.project_name)
 
-        if ctx.query.startswith("项目路径:"):
-            rest = ctx.query[5:].strip()
-            if '\n' in rest:
-                target_project_path = rest[:rest.index('\n')].strip()
-            else:
-                target_project_path = rest.strip()
-            target_project_name = Path(target_project_path).name
-        else:
-            path_match = re.search(r'(D:/[^\s]+|/[a-zA-Z]/[^\s]+|[a-zA-Z]:\\[^\s]+)', ctx.query)
-            if path_match:
-                target_project_path = path_match.group(1)
-                target_project_name = Path(target_project_path).name
-
-        if target_project_path:
-            project_knowledge = load_project_knowledge(target_project_name)
+        if target_project_name:
             if project_knowledge:
-                yield {"type": "status", "message": f"发现已存在项目知识: {target_project_name}"}
+                yield {"type": "status", "message": f"已关联项目: {target_project_name}"}
                 yield {"type": "status", "message": f"项目框架: {project_knowledge.get('framework', '未知')}, 页面数: {len(project_knowledge.get('pages', []))}"}
-            else:
+            elif target_project_path:
                 yield {"type": "status", "message": f"项目 {target_project_name} 没有知识，开始扫描..."}
                 async for evt in run_project_scan(target_project_path, registry):
                     yield evt
                     if evt.get('type') == 'project_scan_done':
                         project_knowledge = load_project_knowledge(target_project_name)
                         if project_knowledge:
-                            yield {"type": "status", "message": f"项目扫描完成，已加载知识"}
+                            yield {"type": "status", "message": f"项目扫描完成，已加载知识: {target_project_name}"}
+            else:
+                # 有项目名但无路径也无知识，尝试从 project.json 中获取路径再扫描
+                yield {"type": "status", "message": f"已关联项目: {target_project_name}（无本地知识）"}
         else:
-            target_project_name = ctx.project_name if ctx.project_name else find_relevant_project(ctx.query)
-            if target_project_name:
-                yield {"type": "status", "message": f"发现已存在项目知识: {target_project_name}"}
-                project_knowledge = load_project_knowledge(target_project_name)
-                if project_knowledge:
-                    yield {"type": "status", "message": f"项目框架: {project_knowledge.get('framework', '未知')}, 页面数: {len(project_knowledge.get('pages', []))}"}
+            yield {"type": "status", "message": "未关联任何项目，仅做文档解析"}
 
-        if not ctx.has_images:
+        if not use_vl:
             yield {"type": "status", "message": "正在解析需求文档..."}
-            parsed_requirements = requirement_analyzer.parse_requirements(ctx.query, ctx.conv_id or "")
+            parsed_requirements = requirement_analyzer.parse_requirements(query_with_files, ctx.conv_id or "")
 
             yield {"type": "status", "message": f"解析出 {parsed_requirements['total_requirements']} 条需求"}
 
@@ -157,9 +179,18 @@ class DocumentWorkflow:
 
             yield {"type": "status", "message": "正在保存文档总结..."}
             doc_name = f"需求分析_{parsed_requirements.get('total_requirements', 0)}条需求"
-            await asyncio.to_thread(save_document_summary, doc_name, full_response, target_project)
-            yield {"type": "status", "message": f"文档总结已保存到 {'项目' + target_project if target_project else '全局'} docs 目录"}
+            await asyncio.to_thread(save_document_summary, doc_name, full_response, target_project_name)
+            yield {"type": "status", "message": f"文档总结已保存到 {'项目' + target_project_name if target_project_name else '全局'} docs 目录"}
         else:
+            # 图文融合分析分支：把文档文本、用户问题、所有图片一起送入 VL 模型
+            document_text_parts = []
+            for f in ctx.files:
+                if isinstance(f, dict) and f.get("type") == "text" and "content" in f:
+                    document_text_parts.append(
+                        f"【文档: {f.get('filename', 'unknown')}】\n{f['content'][:8000]}"
+                    )
+            document_text = "\n\n".join(document_text_parts)
+
             direct_prompt = f"""你是 GT Agent，一个本地智能开发助手。
 
 {ANTI_HALLUCINATION_RULES}
@@ -174,19 +205,24 @@ class DocumentWorkflow:
 可用能力: {ctx.cap_desc}
 {image_hint}
 
-用户已上传文件，文件内容已包含在问题中，请直接根据文件内容回答用户问题：
-{ctx.query}"""
+## 文档文本
+{document_text if document_text else '（无文本内容）'}
 
-            yield {"type": "status", "message": "正在生成回答..."}
+用户问题：
+{ctx.query}
+
+请结合上述文档文本和图片内容回答用户问题。如果文档中包含截图、流程图、表格截图等，请详细描述并解释其与文本的关系。"""
+
+            yield {"type": "status", "message": "正在生成图文融合回答..."}
 
             user_content = [{"type": "text", "text": direct_prompt}]
-            for img in ctx.images:
+            for img in all_images:
                 user_content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:{img['mime']};base64,{img['data']}"}
+                    "image_url": {"url": _data_uri_from_image(img)}
                 })
             messages = [
-                {"role": "system", "content": "你是一个专业的开发助手，具备图片理解能力"},
+                {"role": "system", "content": "你是一个专业的开发助手，具备图片理解能力，能够结合文档文字和嵌入图片进行分析。"},
                 {"role": "user", "content": user_content}
             ]
 
@@ -204,9 +240,9 @@ class DocumentWorkflow:
                     yield {"type": "token", "content": token}
 
             yield {"type": "status", "message": "正在保存文档总结..."}
-            doc_name = f"图片分析_{len(ctx.images)}张图片"
-            await asyncio.to_thread(save_document_summary, doc_name, full_response, target_project)
-            yield {"type": "status", "message": f"文档总结已保存到 {'项目' + target_project if target_project else '全局'} docs 目录"}
+            doc_name = f"图文分析_{len(all_images)}张图片"
+            await asyncio.to_thread(save_document_summary, doc_name, full_response, target_project_name)
+            yield {"type": "status", "message": f"文档总结已保存到 {'项目' + target_project_name if target_project_name else '全局'} docs 目录"}
 
         yield {
             "type": "done",
@@ -218,5 +254,5 @@ class DocumentWorkflow:
             "execution_trace": [],
             "is_complete": True,
             "conversation_id": ctx.conv_id or "",
-            "project_context": {"project_name": target_project, "has_knowledge": project_knowledge is not None} if target_project else {}
+            "project_context": {"project_name": target_project_name, "has_knowledge": project_knowledge is not None} if target_project_name else {}
         }

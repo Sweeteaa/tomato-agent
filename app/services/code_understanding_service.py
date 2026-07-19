@@ -225,9 +225,180 @@ class VueFileAnalyzer:
         return "、".join(list(set(business_hints))) if business_hints else "通用页面"
 
 
+class GenericCodeAnalyzer:
+    """通用代码分析器，支持 Python/Go/Java/Rust 等后端语言"""
+    
+    # 通用技术关键词（项目无关）
+    _tech_keywords = {
+        "config": ["config", "settings", "configuration", "options"],
+        "database": ["database", "db", "model", "schema", "migration", "query", "table"],
+        "api": ["api", "endpoint", "route", "handler", "request", "response", "middleware"],
+        "auth": ["auth", "login", "token", "session", "permission", "role"],
+        "io": ["file", "path", "read", "write", "upload", "download", "stream"],
+        "async": ["async", "await", "coroutine", "task", "queue", "worker"],
+        "cli": ["command", "argument", "parser", "cli", "option", "flag"],
+        "event": ["event", "hook", "signal", "listener", "callback", "trigger"],
+        "security": ["encrypt", "decrypt", "hash", "salt", "ssl", "tls", "certificate"],
+        "network": ["socket", "http", "websocket", "tcp", "udp", "server", "client"],
+        "memory": ["cache", "store", "memory", "persist", "serialize", "deserialize"],
+        "test": ["test", "assert", "mock", "fixture", "expect"],
+    }
+    
+    def analyze_file(self, file_path: str, content: str) -> Dict[str, Any]:
+        file_name = Path(file_path).name
+        ext = Path(file_path).suffix.lower()
+        
+        analysis = {
+            "file": file_name,
+            "relative_path": file_path,
+            "type": self._detect_file_type(file_name, ext, content),
+            "business": "",
+            "features": [],
+            "dependencies": [],
+            "imports": [],
+            "classes": [],
+            "functions": [],
+            "decorators": [],
+        }
+        
+        if ext == ".py":
+            self._analyze_python(content, analysis)
+        elif ext == ".go":
+            self._analyze_go(content, analysis)
+        elif ext in (".js", ".ts"):
+            self._analyze_js_ts(content, analysis)
+        
+        analysis["business"] = self._infer_module_purpose(analysis)
+        return analysis
+    
+    def _detect_file_type(self, file_name: str, ext: str, content: str) -> str:
+        type_map = {
+            "__init__.py": "package_init",
+            "__main__.py": "entry_point",
+            "main.py": "entry_point",
+            "app.py": "entry_point",
+            "main.go": "entry_point",
+            "lib.rs": "library_root",
+        }
+        if file_name in type_map:
+            return type_map[file_name]
+        
+        if ext == ".py":
+            if "class " in content and "def " in content:
+                return "module_class"
+            elif "def " in content:
+                return "module_function"
+            return "python_module"
+        elif ext == ".go":
+            return "go_module"
+        elif ext in (".js", ".ts"):
+            return "script_module"
+        return "source_file"
+    
+    def _analyze_python(self, content: str, analysis: Dict):
+        # 提取类
+        classes = re.findall(r'class\s+(\w+)(?:\([^)]*\))?:', content)
+        analysis["classes"] = classes[:20]
+        
+        # 提取函数
+        functions = re.findall(r'def\s+(\w+)\s*\(', content)
+        analysis["functions"] = [f for f in functions if not f.startswith('_')][:20]
+        
+        # 提取导入
+        imports = re.findall(r'(?:from|import)\s+([\w.]+)', content)
+        analysis["imports"] = [{"alias": "", "path": imp} for imp in imports[:30]]
+        analysis["dependencies"] = list(set(imp.split('.')[0] for imp in imports if '.' in imp or imp not in ('os', 'sys', 're', 'json', 'pathlib', 'typing', 'logging', 'asyncio', 'collections')))[:15]
+        
+        # 提取装饰器
+        decorators = re.findall(r'@(\w+)', content)
+        analysis["decorators"] = list(set(decorators))[:10]
+        
+        # 检测技术特征
+        lower_content = content.lower()
+        for tech_key, keywords in self._tech_keywords.items():
+            if any(kw in lower_content for kw in keywords):
+                analysis["features"].append(tech_key)
+    
+    def _analyze_go(self, content: str, analysis: Dict):
+        # 提取函数
+        functions = re.findall(r'func\s+(?:\([^)]*\)\s+)?(\w+)\s*\(', content)
+        analysis["functions"] = functions[:20]
+        
+        # 提取结构体
+        structs = re.findall(r'type\s+(\w+)\s+struct', content)
+        analysis["classes"] = structs[:15]
+        
+        # 提取导入
+        imports = re.findall(r'"([^"]+)"', content)
+        analysis["imports"] = [{"alias": "", "path": imp} for imp in imports[:20]]
+        analysis["dependencies"] = [imp.split('/')[-1] for imp in imports if '/' in imp][:10]
+        
+        lower_content = content.lower()
+        for tech_key, keywords in self._tech_keywords.items():
+            if any(kw in lower_content for kw in keywords):
+                analysis["features"].append(tech_key)
+    
+    def _analyze_js_ts(self, content: str, analysis: Dict):
+        # 提取函数
+        functions = re.findall(r'(?:export\s+)?(?:async\s+)?function\s+(\w+)', content)
+        functions += re.findall(r'(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?\(', content)
+        analysis["functions"] = list(set(functions))[:20]
+        
+        # 提取导入
+        imports = re.findall(r'import\s+.*?from\s+[\'"]([^\'"]+)[\'"]', content)
+        analysis["imports"] = [{"alias": "", "path": imp} for imp in imports[:20]]
+        
+        lower_content = content.lower()
+        for tech_key, keywords in self._tech_keywords.items():
+            if any(kw in lower_content for kw in keywords):
+                analysis["features"].append(tech_key)
+    
+    def _infer_module_purpose(self, analysis: Dict) -> str:
+        features = analysis["features"]
+        file_name = analysis["file"].lower()
+        
+        hints = []
+        
+        # 从文件名推断
+        name_hints = {
+            "config": "配置管理", "schema": "数据模型", "model": "数据模型",
+            "router": "路由定义", "route": "路由定义", "handler": "请求处理",
+            "service": "业务服务", "manager": "管理器", "factory": "工厂创建",
+            "registry": "注册发现", "runner": "执行引擎", "loop": "事件循环",
+            "context": "上下文管理", "middleware": "中间件", "hook": "钩子扩展",
+            "store": "状态存储", "cache": "缓存层", "queue": "消息队列",
+            "worker": "异步任务", "channel": "通道管理", "provider": "模型提供商",
+        }
+        for keyword, hint in name_hints.items():
+            if keyword in file_name:
+                hints.append(hint)
+                break
+        
+        # 从技术特征推断
+        feature_labels = {
+            "api": "API 接口",
+            "database": "数据库操作",
+            "auth": "认证授权",
+            "async": "异步处理",
+            "event": "事件系统",
+            "io": "文件 I/O",
+            "network": "网络通信",
+            "memory": "内存/缓存",
+            "security": "安全加密",
+            "cli": "命令行工具",
+            "test": "测试",
+        }
+        for feature, label in feature_labels.items():
+            if feature in features and label not in hints:
+                hints.append(label)
+        
+        return "、".join(hints[:3]) if hints else "通用模块"
+
+
 class CodeUnderstandingService:
     def __init__(self):
         self._vue_analyzer = VueFileAnalyzer()
+        self._generic_analyzer = GenericCodeAnalyzer()
 
     def analyze_project_files(self, project_root: str, file_paths: List[str]) -> List[Dict[str, Any]]:
         results = []
@@ -251,9 +422,13 @@ class CodeUnderstandingService:
         return results
 
     def build_project_knowledge(self, project_root: str, scan_data: Dict[str, Any], code_index: Dict[str, Any] = None) -> Dict[str, Any]:
+        project_type = scan_data.get("project_type", "")
+        is_frontend = project_type == "node" or (not project_type and scan_data.get("framework") in ["vue", "react", "angular"])
+        
         knowledge = {
             "project": scan_data.get("project", ""),
             "root_path": scan_data.get("root_path", ""),
+            "project_type": project_type,
             "framework": scan_data.get("framework", ""),
             "build_tool": scan_data.get("build_tool", ""),
             "package_manager": scan_data.get("package_manager", ""),
@@ -267,33 +442,52 @@ class CodeUnderstandingService:
             "data_flow": [],
         }
 
-        if code_index:
-            knowledge["pages"] = self._analyze_pages_from_code_index(code_index.get("pages", []))
-            knowledge["components"] = self._analyze_components_from_code_index(code_index.get("components", []))
-            knowledge["api_modules"] = self._analyze_api_from_code_index(code_index.get("api_modules", []))
+        if is_frontend:
+            # 前端项目：使用 Vue/React 分析器
+            if code_index:
+                knowledge["pages"] = self._analyze_pages_from_code_index(code_index.get("pages", []))
+                knowledge["components"] = self._analyze_components_from_code_index(code_index.get("components", []))
+                knowledge["api_modules"] = self._analyze_api_from_code_index(code_index.get("api_modules", []))
+            else:
+                pages = scan_data.get("pages", [])
+                components = scan_data.get("components", [])
+                api_modules = scan_data.get("api_modules", [])
+
+                if pages and isinstance(pages[0], dict) and "content" in pages[0]:
+                    knowledge["pages"] = self._analyze_pages_with_content(pages)
+                else:
+                    knowledge["pages"] = self.analyze_project_files(project_root, pages)
+
+                if components and isinstance(components[0], dict) and "content" in components[0]:
+                    knowledge["components"] = self._analyze_components_with_content(components)
+                else:
+                    knowledge["components"] = self.analyze_project_files(project_root, components)
+
+                if api_modules and isinstance(api_modules[0], dict) and "content" in api_modules[0]:
+                    knowledge["api_modules"] = self._analyze_api_with_content(api_modules)
+                else:
+                    api_files = [m["path"] for m in api_modules] if api_modules else []
+                    knowledge["api_modules"] = self.analyze_project_files(project_root, api_files)
         else:
+            # 后端项目：使用通用代码分析器
             pages = scan_data.get("pages", [])
-            components = scan_data.get("components", [])
-            api_modules = scan_data.get("api_modules", [])
-
-            if pages and isinstance(pages[0], dict) and "content" in pages[0]:
-                knowledge["pages"] = self._analyze_pages_with_content(pages)
-            else:
-                knowledge["pages"] = self.analyze_project_files(project_root, pages)
-
-            if components and isinstance(components[0], dict) and "content" in components[0]:
-                knowledge["components"] = self._analyze_components_with_content(components)
-            else:
-                knowledge["components"] = self.analyze_project_files(project_root, components)
-
-            if api_modules and isinstance(api_modules[0], dict) and "content" in api_modules[0]:
-                knowledge["api_modules"] = self._analyze_api_with_content(api_modules)
-            else:
-                api_files = [m["path"] for m in api_modules] if api_modules else []
-                knowledge["api_modules"] = self.analyze_project_files(project_root, api_files)
+            for page in pages:
+                file_path = page.get("path", "")
+                content = page.get("content", "")
+                if content:
+                    analysis = self._generic_analyzer.analyze_file(file_path, content)
+                    knowledge["pages"].append(analysis)
+                elif file_path:
+                    full_path = Path(project_root) / file_path
+                    if full_path.exists():
+                        try:
+                            content = full_path.read_text(encoding="utf-8", errors="ignore")
+                            analysis = self._generic_analyzer.analyze_file(file_path, content)
+                            knowledge["pages"].append(analysis)
+                        except Exception:
+                            pass
 
         knowledge["data_flow"] = self._build_data_flow(knowledge)
-
         return knowledge
 
     def _analyze_pages_with_content(self, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -462,15 +656,23 @@ class CodeUnderstandingService:
         return data_flow
 
     def summarize_business_capabilities(self, knowledge: Dict[str, Any]) -> str:
+        project_type = knowledge.get("project_type", "")
+        is_frontend = project_type == "node" or (not project_type and knowledge.get("framework") in ["vue", "react", "angular"])
+        
+        if is_frontend:
+            return self._summarize_frontend(knowledge)
+        else:
+            return self._summarize_backend(knowledge)
+    
+    def _summarize_frontend(self, knowledge: Dict[str, Any]) -> str:
+        """前端项目业务能力总结"""
         sections = ["# 项目业务能力总结"]
-
         pages_by_business = {}
         for page in knowledge.get("pages", []):
             business = page.get("business", "未分类")
             if business not in pages_by_business:
                 pages_by_business[business] = []
             pages_by_business[business].append(page)
-
         if pages_by_business:
             sections.append("## 业务模块")
             for business, pages in pages_by_business.items():
@@ -478,19 +680,58 @@ class CodeUnderstandingService:
                 for page in pages:
                     features = ", ".join(page.get("features", [])[:5])
                     sections.append(f"- **{page['file']}**: {features}")
-
         api_count = len(knowledge.get("api_modules", []))
         if api_count > 0:
             sections.append(f"\n## API 模块 ({api_count}个)")
             for api in knowledge.get("api_modules", []):
                 methods = ", ".join(api.get("methods", [])[:5])
                 sections.append(f"- **{api['file']}**: {methods}")
-
         components_count = len(knowledge.get("components", []))
         if components_count > 0:
             sections.append(f"\n## 公共组件 ({components_count}个)")
             for comp in knowledge.get("components", []):
                 features = ", ".join(comp.get("features", [])[:3])
                 sections.append(f"- **{comp['file']}**: {features}")
-
+        return "\n".join(sections)
+    
+    def _summarize_backend(self, knowledge: Dict[str, Any]) -> str:
+        """后端项目模块职责总结"""
+        sections = ["# 项目模块职责分析"]
+        
+        pages = knowledge.get("pages", [])
+        if not pages:
+            return "\n".join(sections) + "\n\n暂无模块信息"
+        
+        # 按模块分组
+        modules_by_purpose = {}
+        for page in pages:
+            purpose = page.get("business", "通用模块")
+            if purpose not in modules_by_purpose:
+                modules_by_purpose[purpose] = []
+            modules_by_purpose[purpose].append(page)
+        
+        if modules_by_purpose:
+            sections.append("## 模块分类")
+            for purpose, modules in sorted(modules_by_purpose.items()):
+                sections.append(f"\n### {purpose}")
+                for mod in modules:
+                    classes = mod.get("classes", [])
+                    functions = mod.get("functions", [])
+                    details = []
+                    if classes:
+                        details.append(f"类: {', '.join(classes[:5])}")
+                    if functions:
+                        details.append(f"函数: {', '.join(functions[:5])}")
+                    detail_str = f" ({'; '.join(details)})" if details else ""
+                    sections.append(f"- **{mod['file']}**{detail_str}")
+        
+        # 依赖分析
+        all_deps = set()
+        for page in pages:
+            all_deps.update(page.get("dependencies", []))
+        if all_deps:
+            sections.append(f"\n## 主要依赖包 ({len(all_deps)} 个)")
+            for dep in sorted(all_deps)[:15]:
+                sections.append(f"- {dep}")
+        
         return "\n".join(sections)

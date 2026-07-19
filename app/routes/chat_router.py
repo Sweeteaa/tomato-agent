@@ -10,8 +10,17 @@ router = APIRouter(prefix="/api", tags=["chat"])
 
 
 async def _stream_events(query: str, conv_id: str, file_contents: list):
-    async for event in chat_with_agent_stream(query, conv_id, file_contents):
-        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    try:
+        async for event in chat_with_agent_stream(query, conv_id, file_contents):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        logger.error("流式响应异常: %s", e, exc_info=True)
+        # 发送错误事件而不是直接断开
+        error_event = {"type": "done", "response": f"处理出错: {str(e)}", 
+                       "context_used": False, "tool_executions": [], "plan": [],
+                       "plan_steps": 0, "execution_trace": [], "is_complete": False,
+                       "conversation_id": conv_id or ""}
+        yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
 
 
 @router.post("/chat")
